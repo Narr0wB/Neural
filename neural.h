@@ -9,8 +9,8 @@
 
 #define __GPU_ACCELERATION_CUDA
 
-typedef double** HPDOUBLE; // Host pointer (double)
-typedef double* DPDOUBLE; // Device pointer (double)
+typedef double** HPDOUBLE; // Host Pointer (DOUBLE)
+typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
 
 struct DMATRIX {
     DPDOUBLE dataPtr;
@@ -80,22 +80,22 @@ Matrix one_hot(int label);
 
 // Activation functions 
 inline double ReLU(double in);
-double ReLU_d(double in);
+inline double ReLU_d(double in);
 
-double sigmoid(double in);
+inline double sigmoid(double in);
 Matrix sigmoid_d(const Matrix& in);
-double sigmoid_d(double in);
+inline double sigmoid_d(double in);
 
-double tanh_d(double in);
+inline double tanh_d(double in);
 
-double mish(double in);
-double mish_d(double in);
+inline double mish(double in);
+inline double mish_d(double in);
 
-double softplus(double in);
-double softplus_d(double in);
+inline double softplus(double in);
+inline double softplus_d(double in);
 
-double MSE(Matrix A, DMATRIX B);
+inline double MSE(Matrix A, DMATRIX B);
 
-double mean(Matrix in);
+inline double mean(Matrix in);
 
 #endif

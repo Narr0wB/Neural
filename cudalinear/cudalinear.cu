@@ -112,7 +112,7 @@ DMATRIX dMatAdd(DMATRIX A, DMATRIX B)
 
     mat_add<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, sum.dataPtr, sum.rows, sum.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return sum;
 }
@@ -130,7 +130,7 @@ DMATRIX dMatSubtract(DMATRIX A, DMATRIX B)
 
     mat_subtract<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, diff.dataPtr, diff.rows, diff.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return diff;
 }
@@ -147,7 +147,7 @@ DMATRIX dMatDot(DMATRIX A, DMATRIX B)
 
     mat_dot<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, dot.dataPtr, dot.rows, dot.cols, A.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return dot;
 }
@@ -165,7 +165,7 @@ DMATRIX dMatMultiply(DMATRIX A, DMATRIX B)
 
     mat_multiply<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, mul.dataPtr, mul.rows, mul.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return mul;
 }
@@ -183,7 +183,7 @@ DMATRIX dMatScale(DMATRIX A, double s)
 
     mat_scale<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, scal.dataPtr, s, scal.rows, scal.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return scal;
 }
@@ -201,7 +201,7 @@ DMATRIX dMatTranspose(DMATRIX A)
 
     mat_transpose<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, transp.dataPtr, A.rows, A.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return transp;
 }
@@ -222,7 +222,7 @@ DMATRIX dMatApply(DMATRIX A, int op_idx)
 
     mat_apply<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, app.dataPtr, op_idx, app.rows, app.cols);
 
-    //cudaDeviceSynchronize();
+    
 
     return app;
 }
