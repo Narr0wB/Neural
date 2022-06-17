@@ -181,7 +181,7 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_
     auto train_stop = std::chrono::steady_clock::now();
     double epoch_time = (double) std::chrono::duration_cast<std::chrono::seconds>(train_stop - train_start).count() / epochs;
     if (verbose)
-        printf("\n\nTime elapsed: %zds, ~%fs per epoch\n", std::chrono::duration_cast<std::chrono::seconds>(train_stop - train_start).count(), epoch_time);
+        printf("\n\nTime elapsed: %zds, ~%.2fs per epoch\n", std::chrono::duration_cast<std::chrono::seconds>(train_stop - train_start).count(), epoch_time);
 }
 
 double SimpleNeuralNetwork::evaluate(ImageList data_set, bool verbose)
