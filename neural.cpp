@@ -219,9 +219,11 @@ Matrix SimpleNeuralNetwork::run(Image* i)
 {
     // Flatten image data into a big one-dimensional vector
     Matrix A0 = (*i->image_data).flatten(ROW_FLATTEN);
+
     // Propagate to the first layer (Hidden layer)
     Matrix Z1 = (W0 * A0) + B0;
     Matrix A1 = Z1.apply(sigmoid);
+    
     // Propagate to the second layer (Output layer)
     Matrix Z2 = (W1 * A1) + B1;
     Matrix A2 = Z2.apply(sigmoid);
@@ -234,7 +236,7 @@ void SimpleNeuralNetwork::run_visual(Image* i)
 {
     Matrix prediction = run(i);
     std::cout << *i << std::endl;
-    std::cout << "Prediction " << prediction.argmax(COLUMN, 0) << std::endl;
+    std::cout << "Prediction: " << prediction.argmax(COLUMN, 0) << std::endl;
 }
 
 void SimpleNeuralNetwork::save(const char* path)
