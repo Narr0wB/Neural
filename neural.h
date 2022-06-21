@@ -7,7 +7,7 @@
 
 #include "image.h"
 
-#define __GPU_ACCELERATION_CUDA
+//#define __GPU_ACCELERATION_CUDA
 
 typedef double** HPDOUBLE; // Host Pointer (DOUBLE)
 typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
@@ -18,6 +18,7 @@ struct DMATRIX {
     size_t cols;
 };
 
+#ifdef __GPU_ACCELERATION_CUDA
 extern DMATRIX dMatAdd(DMATRIX A, DMATRIX B);
 extern DMATRIX dMatSubtract(DMATRIX A, DMATRIX B);
 extern DMATRIX dMatDot(DMATRIX A, DMATRIX B);
@@ -26,9 +27,13 @@ extern DMATRIX dMatScale(DMATRIX A, double s);
 extern DMATRIX dMatTranspose(DMATRIX A);
 extern DMATRIX dMatApply(DMATRIX A, int op_idx);
 extern DMATRIX dMatCreate(size_t rows, size_t cols);
+extern DMATRIX dDenseForwardProp(DMATRIX Wn, DMATRIX An, DMATRIX Bn);
+extern DMATRIX* dDenseBackProp(DMATRIX dY, DMATRIX Zm, DMATRIX An, int derivativeIdx);
 extern void dMatFree(DMATRIX A);
 extern HPDOUBLE copyDeviceToHost(DMATRIX A);
 extern DMATRIX copyHostToDevice(HPDOUBLE A, size_t rows, size_t cols);
+inline double MSE(Matrix A, DMATRIX B);
+#endif
 
 struct SimpleNeuralNetwork
 {
@@ -43,13 +48,13 @@ struct SimpleNeuralNetwork
 
 
     public:
-        SimpleNeuralNetwork(ImageList data_set, size_t epochs, size_t batch_size, double alpha, bool verbose = false) : W0(300, 28*28), B0(300, 1), W1(10, 300), B1(10, 1)
+        SimpleNeuralNetwork(ImageList data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100) : W0(300, 28*28), B0(300, 1), W1(10, 300), B1(10, 1)
         {   
             W0.randn(0, 1);
             B0.randn(0, 1);
             W1.randn(0, 1);
             B1.randn(0, 1);
-            train(data_set, epochs, batch_size, alpha, verbose);
+            train(data_set, epochs, learn_rate, verbose, batch_size);
         };
 
         SimpleNeuralNetwork(const char* path) : W0(300, 28*28), B0(300, 1), W1(10, 300), B1(10, 1)
@@ -66,8 +71,9 @@ struct SimpleNeuralNetwork
         };
 
         double evaluate(ImageList data_set, bool verbose);
+        int predict(Image* i);
 
-        void train(ImageList data_set, size_t epochs, size_t batch_size, double alpha, bool verbose = false);
+        void train(ImageList data_set, size_t epochs, double alpha, bool verbose = false, size_t batch_size = 100);
 
         void save(const char* path);
         void load(const char* path);
@@ -93,8 +99,6 @@ inline double mish_d(double in);
 
 inline double softplus(double in);
 inline double softplus_d(double in);
-
-inline double MSE(Matrix A, DMATRIX B);
 
 inline double mean(Matrix in);
 

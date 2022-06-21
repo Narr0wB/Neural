@@ -1,13 +1,14 @@
 
 #include "neural.h"
 
-void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_size, double alpha, bool verbose)
+void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, double alpha, bool verbose, size_t batch_size)
 {
     auto train_start = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point start;
     size_t batch_time;
     for (int j = 0; j < epochs; j++)
     {
+        printf("\n");
         #ifdef __GPU_ACCELERATION_CUDA
 
         DMATRIX d_W0 = copyHostToDevice(W0.getdata(), W0.rows, W0.cols);
@@ -16,82 +17,74 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_
         DMATRIX d_B1 = copyHostToDevice(B1.getdata(), B1.rows, B1.cols);
 
         int counter = 0;
+        
+        DMATRIX velW0 = dMatCreate(W0.rows, W0.cols);
+        DMATRIX velB0 = dMatCreate(B0.rows, B0.cols);
+        DMATRIX velW1 = dMatCreate(W1.rows, W1.cols);
+        DMATRIX velB1 = dMatCreate(B1.rows, B1.cols);
+        
         for (size_t i = 0; i < data_set.length; i++, counter++)
         {   
             if (counter == 1)
                 start = std::chrono::steady_clock::now();
-
+            
             // Flatten image data into a big one-dimensional vector
             DMATRIX tmpA0 = copyHostToDevice((*data_set[i]->image_data).flatten(ROW_FLATTEN).transpose().getdata(), B0.cols, W0.cols);
             DMATRIX d_A0 = dMatTranspose(tmpA0);
             dMatFree(tmpA0);
+
             // Propagate to the first layer (Hidden layer)
-            DMATRIX dotZ1 = dMatDot(d_W0, d_A0);
-            DMATRIX d_Z1 = dMatAdd(dotZ1, d_B0);
+            DMATRIX d_Z1 = dDenseForwardProp(d_W0, d_A0, d_B0);
             DMATRIX d_A1 = dMatApply(d_Z1, 0);
             
             // Propagate to the second layer (Output layer)
-            DMATRIX dotZ2 = dMatDot(d_W1, d_A1);
-            DMATRIX d_Z2 = dMatAdd(dotZ2, d_B1);
+            DMATRIX d_Z2 = dDenseForwardProp(d_W1, d_A1, d_B1);
             DMATRIX d_A2 = dMatApply(d_Z2, 0);
-
-            dMatFree(dotZ1);
-            dMatFree(dotZ2);
 
             // Calculate error
             Matrix yhat(10, 1);
             yhat[data_set[i]->label][0] = 1.0;
             DMATRIX d_yhat = copyHostToDevice(yhat.getdata(), yhat.rows, yhat.cols);
-
+            
             if (counter == batch_size && verbose)
             {
                 counter = 0;
                 auto stop = std::chrono::steady_clock::now();
                 batch_time = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
-                printf("E: %d/%zd I: %zd/%zd Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)\n", j+1, epochs, i / std::min(batch_size, data_set.length), data_set.length / std::min(batch_size, data_set.length), MSE(yhat, d_A2), batch_time, batch_size);
+                printf("\rE: %d/%zd I: %.0f/%zd Error: %.8f (MSE) Alpha: %.2f | speed: %zdms/batch (batch size: %zd)", j+1, epochs, ceil((double) i / std::min(batch_size, data_set.length)), data_set.length / std::min(batch_size, data_set.length), MSE(yhat, d_A2), alpha, batch_time, batch_size);
             }
-
-            DMATRIX subtracted = dMatSubtract(d_A2, d_yhat);
-            DMATRIX applied = dMatApply(d_Z2, 1);
-            DMATRIX d_dB1 = dMatMultiply(applied, subtracted);
-            DMATRIX transposed = dMatTranspose(d_A1);
-            DMATRIX d_dW1 = dMatDot(d_dB1, transposed);
             
-            dMatFree(applied);
-            dMatFree(transposed);
-            dMatFree(d_yhat);
+            DMATRIX subtracted = dMatSubtract(d_A2, d_yhat);
+            DMATRIX* d1 = dDenseBackProp(subtracted, d_Z2, d_A1, 1);
+            DMATRIX d_dB1 = d1[0];
+            DMATRIX d_dW1 = d1[1];
+            
+            delete[] d1;
 
             DMATRIX W1transposed = dMatTranspose(d_W1);
             DMATRIX dotted = dMatDot(W1transposed, subtracted);
-            applied = dMatApply(d_Z1, 1);
-            DMATRIX d_dB0 = dMatMultiply(applied, dotted);
-            transposed = dMatTranspose(d_A0);
-            DMATRIX d_dW0 = dMatDot(d_dB0, transposed);
-
+            DMATRIX* d0 = dDenseBackProp(dotted, d_Z1, d_A0, 1);
+            DMATRIX d_dB0 = d0[0];
+            DMATRIX d_dW0 = d0[1];
+            
+            delete[] d0;
             dMatFree(d_Z1);
             dMatFree(d_Z2);
             dMatFree(d_A0);
             dMatFree(d_A1);
             dMatFree(d_A2);
             dMatFree(subtracted);
-            dMatFree(applied);
-            dMatFree(transposed);
             dMatFree(W1transposed);
             dMatFree(dotted);
-
-            // Matrix dW1 = hadamard(sigmoid_d(A2), (A2 - y_hat)) * A1.transpose();
-            // Matrix dB1 = hadamard(sigmoid_d(A2), (A2 - y_hat));
-            // Matrix dW0 = hadamard(Z1.apply(softplus_d), W1.transpose() * (A2 - y_hat)) * (*data_set[i]->image_data).flatten(ROW_FLATTEN).transpose();
-            // Matrix dB0 = hadamard(Z1.apply(softplus_d), W1.transpose() * (A2 - y_hat));
             
             DMATRIX scaled = dMatScale(d_dW0, alpha);
             subtracted = dMatSubtract(d_W0, scaled);
             
             dMatFree(d_W0);
             d_W0 = subtracted;
-
+            
             dMatFree(scaled);
-
+            
             scaled = dMatScale(d_dB0, alpha);
             subtracted = dMatSubtract(d_B0, scaled);
 
@@ -120,10 +113,7 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_
             dMatFree(d_dB0);
             dMatFree(d_dW1);
             dMatFree(d_dB1);
-            // W0 = W0 - (alpha * dW0);
-            // W1 = W1 - (alpha * dW1);
-            // B0 = B0 - (alpha * dB0);
-            // B1 = B1 - (alpha * dB1);
+
         }
         
         W0.setdata(copyDeviceToHost(d_W0), d_W0.rows, d_W0.cols);
@@ -135,6 +125,10 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_
         dMatFree(d_B0);
         dMatFree(d_W1);
         dMatFree(d_B1);
+        dMatFree(velW0);
+        dMatFree(velB0);
+        dMatFree(velW1);
+        dMatFree(velB1);
 
         #else
 
@@ -162,7 +156,7 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, size_t batch_
                 counter = 0;
                 auto stop = std::chrono::steady_clock::now();
                 batch_time = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
-                printf("E: %d/%zd I: %zd/%zd Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)\n", j+1, epochs, i / std::min(batch_size, data_set.length), data_set.length / std::min(batch_size, data_set.length), mean((A2 - yhat).apply([](double in){return in * in;})), batch_time, batch_size);
+                printf("\rE: %d/%zd I: %zd/%zd Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)", j+1, epochs, i / std::min(batch_size, data_set.length), data_set.length / std::min(batch_size, data_set.length), mean((A2 - yhat).apply([](double in){return in * in;})), batch_time, batch_size);
             }
 
             Matrix dW1 = hadamard(Z2.apply(sigmoid_d), (A2 - yhat)) * A1.transpose();
@@ -191,6 +185,7 @@ double SimpleNeuralNetwork::evaluate(ImageList data_set, bool verbose)
     size_t msAvg = 0;
     std::chrono::steady_clock::time_point start;
 
+    printf("\n");
     for (size_t i = 0; i < data_set.length; i++, counter++)
     {   
         if (counter == 1)
@@ -200,21 +195,24 @@ double SimpleNeuralNetwork::evaluate(ImageList data_set, bool verbose)
         if (data_set[i]->label == prediction.argmax(COLUMN, 0))
             ncorrect++;
 
-        if (counter == min((int)data_set.length, 100))
+        if (counter == std::min((int)data_set.length, 100))
         {
             counter = 0;
             auto stop = std::chrono::steady_clock::now();
             auto timeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
             if (verbose)
-                printf("%zd/%zd %zdms/batch (batch size: %d)\n", i+1, data_set.length, timeElapsed, min((int)data_set.length, 100));
+                printf("\r%zd/%zd %zdms/batch (batch size: %d)", i+1, data_set.length, timeElapsed, std::min((int)data_set.length, 100));
             msAvg += timeElapsed;
         }
-        if (counter == data_set.length)
-            auto stop = std::chrono::steady_clock::now();
     }
     if (verbose)
-        printf("avg batch timing --> %zdms/batch (batch size %d)\n -------------------------------------------\n",  msAvg / (data_set.length / min((int)data_set.length, 100)), min((int)data_set.length, 100));
+        printf("\nTime elapsed: %zds, avg batch timing --> %zdms/batch (batch size %d)\n -------------------------------------------\n", msAvg/1000, msAvg / (data_set.length / std::min((int)data_set.length, 100)), std::min((int)data_set.length, 100));
     return 1.0 * ncorrect / data_set.length;
+}
+
+int SimpleNeuralNetwork::predict(Image* i)
+{
+    return (int) run(i).argmax(COLUMN, 0);
 }
 
 Matrix SimpleNeuralNetwork::run(Image* i)
@@ -301,20 +299,15 @@ void SimpleNeuralNetwork::load(const char* path)
     file.close();
 }
 
+#ifdef __GPU_ACCELERATION_CUDA
 double MSE(Matrix A, DMATRIX B)
 {
     Matrix hB(10, 1);
-    HPDOUBLE hBData = copyDeviceToHost(B);
 
-    // hBData = new double*[1];
-    // hBData[0] = new double[10];
-
-    // cudaMemcpy(hBData[0], B.dataPtr, 80, cudaMemcpyDeviceToHost);
-
-    hB.setdata(hBData, B.rows, B.cols);
-    //std::cout << A << hB;
+    hB.setdata(copyDeviceToHost(B), B.rows, B.cols);
     return mean((hB - A).apply([](double in) {return pow(in, 2);}));
 }
+#endif
 
 Matrix one_hot(int label)
 {

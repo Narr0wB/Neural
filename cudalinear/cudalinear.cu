@@ -21,33 +21,56 @@ typedef double (*op_func) (double);
 
 __device__ op_func funclist[NFUNCTIONS] = { dsigmoid, dsigmoid_d, square };
 
+/*
+                                                    ########## MASK MATRIX #########
+    The mask matrix is a matrix of threads which is overlaid over one or more matrices similar to a 2D Convolution or Cross-Correlation and allows for 
+    faster computation of same-shaped or single matrix matrix operations. The mask matrix moves along the y-axis going down by a stride given by the formula 
+    ((gridDim.x * blockDim.x) / 64) where gridDim.x is the number of blocks, blockDim.x the number of threads in a block, and 64 the fixed x dimention of the matrix. 
+    Once it has reached the bottom, the mask matrix moves along the x-axis by a stride of 64 and along the y-axis coming back up re-alligning its first row with the
+    processed matrix's (or matrices) first row.
+
+    Its composed of n blocks --> 1024 threads each
+    m x 64 thread "matrix" where:
+        m = (n*1024)/64
+    
+    A thread's indices i, j in the mask are given by the following formulas:
+        i = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64)
+        j = threadIdx.x % 64
+*/
+
 
 __global__ void mat_add(DPDOUBLE A, DPDOUBLE B, DPDOUBLE sum, size_t matRows, size_t matCols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
+    
 
-    for (size_t i = idx; i < matRows; i += stride)
-        for (size_t j = 0; j < matCols; j++)
+    for (size_t i = idxR; i < matRows; i += strideX)
+        for (size_t j = idxC; j < matCols; j += strideY)
             sum[ix(i, j, matCols)] = A[ix(i, j, matCols)] + B[ix(i, j, matCols)];
 }
 
 __global__ void mat_subtract(DPDOUBLE A, DPDOUBLE B, DPDOUBLE subtracted, size_t matRows, size_t matCols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
+    
 
-    for (size_t i = idx; i < matRows; i += stride)
-        for (size_t j = 0; j < matCols; j++)
+    for (size_t i = idxR; i < matRows; i += strideX)
+        for (size_t j = idxC; j < matCols; j += strideY)
             subtracted[ix(i, j, matCols)] = A[ix(i, j, matCols)] - B[ix(i, j, matCols)];
 }
 
 __global__ void mat_dot(DPDOUBLE A, DPDOUBLE B, DPDOUBLE dot, size_t dotRows, size_t dotCols, size_t commonDim)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxR = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t strideX = gridDim.x * blockDim.x;
 
-    for (size_t i = idx; i < dotRows; i += stride)
+    for (size_t i = idxR; i < dotRows; i += strideX)
         for (size_t j = 0; j < dotCols; j++)
         {
             double sum = 0;
@@ -59,42 +82,81 @@ __global__ void mat_dot(DPDOUBLE A, DPDOUBLE B, DPDOUBLE dot, size_t dotRows, si
 
 __global__ void mat_multiply(DPDOUBLE A, DPDOUBLE B, DPDOUBLE multiplied, size_t matRows, size_t matCols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
+    
 
-    for (size_t i = idx; i < matRows; i += stride)
-        for (size_t j = 0; j < matCols; j++)
+    for (size_t i = idxR; i < matRows; i += strideX)
+        for (size_t j = idxC; j < matCols; j += strideY)
             multiplied[ix(i, j, matCols)] = A[ix(i, j, matCols)] * B[ix(i, j, matCols)];
 }
 
 __global__ void mat_scale(DPDOUBLE A, DPDOUBLE scaled, double s, size_t matRows, size_t matCols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
+    
 
-    for (size_t i = idx; i < matRows; i += stride)
-        for (size_t j = 0; j < matCols; j++)
+    for (size_t i = idxC; i < matRows; i += strideX)
+        for (size_t j = idxR; j < matCols; j += strideY)
             scaled[ix(i, j, matCols)] = A[ix(i, j, matCols)] * s;
 }
 
 __global__ void mat_transpose(DPDOUBLE A, DPDOUBLE transposed, size_t A_rows, size_t A_cols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
 
-    for (size_t i = idx; i < A_cols; i += stride)
-        for (size_t j = 0; j < A_rows; j++)
+    for (size_t i = idxC; i < A_cols; i += strideY)
+        for (size_t j = idxR; j < A_rows; j += strideX)
             transposed[ix(i, j, A_rows)] = A[ix(j, i, A_cols)];
 }
 
-__global__ void mat_apply(DPDOUBLE A, DPDOUBLE applied, int op_idx, size_t matRows, size_t matCols)
+__global__ void mat_apply(DPDOUBLE A, DPDOUBLE applied, int activationIdx, size_t matRows, size_t matCols)
 {
-    size_t idx = threadIdx.x;
-    size_t stride = blockDim.x;
+    size_t idxC = threadIdx.x % 64;
+    size_t idxR = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    size_t strideX = 64;
+    size_t strideY = ((gridDim.x * blockDim.x) / 64);
 
-    for (size_t i = idx; i < matRows; i += stride)
-        for (size_t j = 0; j < matCols; j++)
-            applied[ix(i, j, matCols)] = funclist[op_idx](A[ix(i, j, matCols)]);
+    for (size_t i = idxR; i < matRows; i += strideX)
+        for (size_t j = idxC; j < matCols; j += strideY)
+            applied[ix(i, j, matCols)] = funclist[activationIdx](A[ix(i, j, matCols)]);
+}
+
+__global__ void dense_forwardprop(DPDOUBLE Wn, DPDOUBLE An, DPDOUBLE Bn, DPDOUBLE Zm, size_t Wrows, size_t Wcols)
+{
+    size_t idxR = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t strideX = gridDim.x * blockDim.x;
+
+    for (size_t i = idxR; i < Wrows; i += strideX)
+    {
+        double sum = 0;
+        for (size_t k = 0; k < Wcols; k++)
+            sum += Wn[ix(i, k, Wcols)] * An[ix(k, 0, 1)];
+        Zm[ix(i, 0, 1)] = sum + Bn[ix(i, 0, 1)];
+    }
+}
+
+__global__ void dense_backprop(DPDOUBLE dY, DPDOUBLE Zm, DPDOUBLE An, DPDOUBLE dBn, DPDOUBLE dWn, size_t Zmrows, size_t Anrows, int derivativeIdx)
+{
+    size_t idxR = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t strideX = gridDim.x * blockDim.x;
+
+    for (size_t i = idxR; i < Zmrows; i += strideX)
+    {
+        dBn[ix(i, 0, 1)] = funclist[derivativeIdx](Zm[ix(i, 0, 1)]) * dY[ix(i, 0, 1)];
+        for (size_t j = 0; j < Anrows; j++)
+        {
+            dWn[ix(i, j, Anrows)] = dBn[ix(i, 0, 1)] * An[ix(j, 0, 1)];
+        }
+    }
 }
 
 // IN-DEVICE MATRIX OPERATIONS ---------------------------------------------------------------------
@@ -112,8 +174,6 @@ DMATRIX dMatAdd(DMATRIX A, DMATRIX B)
 
     mat_add<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, sum.dataPtr, sum.rows, sum.cols);
 
-    
-
     return sum;
 }
 
@@ -130,8 +190,6 @@ DMATRIX dMatSubtract(DMATRIX A, DMATRIX B)
 
     mat_subtract<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, diff.dataPtr, diff.rows, diff.cols);
 
-    
-
     return diff;
 }
 
@@ -146,8 +204,6 @@ DMATRIX dMatDot(DMATRIX A, DMATRIX B)
     cudaMalloc(&dot.dataPtr, (dot.rows * dot.cols) * sizeof(double));
 
     mat_dot<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, dot.dataPtr, dot.rows, dot.cols, A.cols);
-
-    
 
     return dot;
 }
@@ -165,8 +221,6 @@ DMATRIX dMatMultiply(DMATRIX A, DMATRIX B)
 
     mat_multiply<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, B.dataPtr, mul.dataPtr, mul.rows, mul.cols);
 
-    
-
     return mul;
 }
 
@@ -183,8 +237,6 @@ DMATRIX dMatScale(DMATRIX A, double s)
 
     mat_scale<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, scal.dataPtr, s, scal.rows, scal.cols);
 
-    
-
     return scal;
 }
 
@@ -200,8 +252,6 @@ DMATRIX dMatTranspose(DMATRIX A)
     cudaMalloc(&transp.dataPtr, (transp.rows * transp.cols) * sizeof(double));
 
     mat_transpose<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, transp.dataPtr, A.rows, A.cols);
-
-    
 
     return transp;
 }
@@ -222,9 +272,49 @@ DMATRIX dMatApply(DMATRIX A, int op_idx)
 
     mat_apply<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(A.dataPtr, app.dataPtr, op_idx, app.rows, app.cols);
 
-    
-
     return app;
+}
+
+DMATRIX dDenseForwardProp(DMATRIX Wn, DMATRIX An, DMATRIX Bn)
+{
+    if (An.cols != 1 ||
+        Bn.cols != 1 ||
+        An.rows != Wn.cols ||
+        Bn.rows != Wn.rows)
+        throw "INVALID MATRIX";
+    
+    // m = n+1
+    DMATRIX Zm;
+    Zm.rows = Wn.rows;
+    Zm.cols = 1;
+
+    cudaMalloc(&Zm.dataPtr, (Zm.rows * Zm.cols) * sizeof(double));
+
+    dense_forwardprop<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(Wn.dataPtr, An.dataPtr, Bn.dataPtr, Zm.dataPtr, Wn.rows, Wn.cols);
+    
+    return Zm;
+}
+
+DMATRIX* dDenseBackProp(DMATRIX dY, DMATRIX Zm, DMATRIX An, int derivativeIdx)
+{
+    if (An.cols != 1 ||
+        Zm.cols != 1 ||
+        dY.cols != 1 ||
+        Zm.rows != dY.rows)
+        throw "INVALID MATRIX";
+    
+    DMATRIX* pair = new DMATRIX[2];
+    pair[0].rows = Zm.rows;
+    pair[0].cols = 1;
+    pair[1].rows = Zm.rows;
+    pair[1].cols = An.rows;
+
+    cudaMalloc(&pair[0].dataPtr, (pair[0].rows * pair[0].cols) * sizeof(double));
+    cudaMalloc(&pair[1].dataPtr, (pair[1].rows * pair[1].cols) * sizeof(double));
+
+    dense_backprop<<<KERNEL_GRID_SIZE, KERNEL_BLOCK_SIZE>>>(dY.dataPtr, Zm.dataPtr, An.dataPtr, pair[0].dataPtr, pair[1].dataPtr, Zm.rows, An.rows, derivativeIdx);
+
+    return pair;   
 }
 
 // WRAPPERS ----------------------------------------------------------------------------------------
@@ -459,11 +549,21 @@ DMATRIX dMatCreate(size_t rows, size_t cols)
     DMATRIX mat;
     mat.rows = rows;
     mat.cols = cols;
-
+    
+    DPDOUBLE temp = new double[rows*cols];
+    for (int i = 0; i < rows*cols; i++)
+        temp[i] = 0;
+    
     auto result = cudaMalloc(&mat.dataPtr, (mat.rows * mat.cols) * sizeof(double));
 
     if (result != cudaSuccess)
         throw "Memory allocation error";
+    
+    result = cudaMemcpy(mat.dataPtr, temp, (rows * cols) * sizeof(double), cudaMemcpyHostToDevice);
+    delete[] temp;
+
+    if (result != cudaSuccess)
+        throw "Memory copy error";
 
     return mat;
 }

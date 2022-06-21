@@ -8,14 +8,14 @@
 #include <iostream>
 
 #define KERNEL_BLOCK_SIZE 1024
-#define KERNEL_GRID_SIZE 1
+#define KERNEL_GRID_SIZE (dim3(4, 1, 1))
 
 #define NFUNCTIONS 3
 
 #define ix(row, col, N) (row * N) + col
 
-typedef double** HPDOUBLE; // Host pointer (double)
-typedef double* DPDOUBLE; // Device pointer (double)
+typedef double** HPDOUBLE; // Host Pointer (DOUBLE)
+typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
 
 struct DMATRIX {
     DPDOUBLE dataPtr;
@@ -35,7 +35,11 @@ __global__ void mat_scale(DPDOUBLE A, DPDOUBLE scaled, double s, size_t matRows,
 
 __global__ void mat_transpose(DPDOUBLE A, DPDOUBLE transposed, size_t A_rows, size_t A_cols);
 
-__global__ void mat_apply(DPDOUBLE A, DPDOUBLE applied, int op_idx, size_t matRows, size_t matCols);
+__global__ void mat_apply(DPDOUBLE A, DPDOUBLE applied, int activationIdx, size_t matRows, size_t matCols);
+
+__global__ void dense_forwardprop(DPDOUBLE Wn, DPDOUBLE An, DPDOUBLE Bn, DPDOUBLE Zm, size_t Wrows, size_t Wcols);
+
+__global__ void dense_backprop(DPDOUBLE dY, DPDOUBLE Zm, DPDOUBLE An, DPDOUBLE dBn, DPDOUBLE dWn, size_t Zmrows, size_t Anrows, int derivativeIdx);
 
 // IN-DEVICE MATRIX OPERATIONS ---------------------------------------------------------------------
 
@@ -52,6 +56,10 @@ DMATRIX dMatScale(DMATRIX A, double s);
 DMATRIX dMatTranspose(DMATRIX A);
 
 DMATRIX dMatApply(DMATRIX A, int op_idx);
+
+DMATRIX dDenseForwardProp(DMATRIX Wn, DMATRIX An, DMATRIX Bn);
+
+DMATRIX* dDenseBackProp(DMATRIX dY, DMATRIX Zm, DMATRIX An, int derivativeIdx);
 
 // WRAPPERS ----------------------------------------------------------------------------------------
 
