@@ -7,6 +7,8 @@ In order to train the network you will need the make command [Make](https://stat
 
 Once you have installed both make and the CUDA toolkit you can run the current example (in main.cpp) by typing in the terminal `make`
 
+NOTE: If you have a NVIDIA GPU define before including __GPU_ACCELERATION_CUDA to train on the GPU
+
 If you just want to test the accuracy of the pretrained modes, namely "testNeMk0pLR.nn", or train using the CPU you will not need the cuda toolkit but just a C/C++ compiler
 
 
@@ -16,8 +18,6 @@ Load the train and test datasets by using the function in the Image module `Imag
 Then create a SimpleNeuralNetwork object and either pass the constructor the path of a pretrained module (.nn files) or use the train constructor `SimpleNeuralNetwork(ImageList data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100)`
 
 NOTE: If you have trained a model you can save its data by using the function `void SimpleNeuralNetwork::save(const char* path)` and making sure to add .nn as the file's extension
-
-NOTE #2: If you dont have a NVIDIA GPU comment out in neural.h(10) the define __GPU_ACCELERATION_CUDA to train on the CPU
 
 Once trained / loaded the model, you can either evaluate the accuracy of the model using the member function `double evaluate(ImageList data_set, bool verbose)` passing in the train dataset or run a single image by using `void SimpleNeuralNetwork::run_visual(Image* i)`
 
