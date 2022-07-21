@@ -18,11 +18,6 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, double alpha,
 
         int counter = 0;
         
-        DMATRIX velW0 = dMatCreate(W0.rows, W0.cols);
-        DMATRIX velB0 = dMatCreate(B0.rows, B0.cols);
-        DMATRIX velW1 = dMatCreate(W1.rows, W1.cols);
-        DMATRIX velB1 = dMatCreate(B1.rows, B1.cols);
-        
         for (size_t i = 0; i < data_set.length; i++, counter++)
         {   
             if (counter == 1)
@@ -125,10 +120,6 @@ void SimpleNeuralNetwork::train(ImageList data_set, size_t epochs, double alpha,
         dMatFree(d_B0);
         dMatFree(d_W1);
         dMatFree(d_B1);
-        dMatFree(velW0);
-        dMatFree(velB0);
-        dMatFree(velW1);
-        dMatFree(velB1);
 
         #else
 
