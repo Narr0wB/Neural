@@ -7,7 +7,7 @@ In order to train the network you will need the make command [Make](https://stat
 
 Once you have installed both make and the CUDA toolkit you can run the current example (in main.cpp) by typing in the terminal `make`
 
-NOTE: If you have a NVIDIA GPU define before including __GPU_ACCELERATION_CUDA to train on the GPU
+NOTE: If you have a NVIDIA GPU define before including the modules __GPU_ACCELERATION_CUDA to train on the GPU
 
 If you just want to test the accuracy of the pretrained modes, namely "testNeMk0pLR.nn", or train using the CPU you will not need the cuda toolkit but just a C/C++ compiler
 
