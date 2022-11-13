@@ -22,3 +22,26 @@ NOTE: If you have trained a model you can save its data by using the function `v
 Once trained / loaded the model, you can either evaluate the accuracy of the model using the member function `double evaluate(ImageList data_set, bool verbose)` passing in the train dataset or run a single image by using `void SimpleNeuralNetwork::run_visual(Image* i)`
 
 NOTE: the ImageList objects have the [] operator overloaded, meaning that they can return an Image* if given a valid index (e.g `Image* test = train[1]`), which in turn can be used with `void SimpleNeuralNetwork::run_visual(Image* i)`
+
+## Examples
+
+```
+
+#include <iostream>
+#include "neural.h"
+#include "cudalinear/linalg.h"
+#include "image.h"
+
+int main(int argc, char** argv) {
+
+    ImageList train = csv_to_image("mnist_train.csv", 10000); // MAX IMGS -> 60k
+    ImageList test = csv_to_image("mnist_test.csv", 1000); // MAX IMGS -> 10k
+
+    SimpleNeuralNetwork e("test10e60k0p25.nn"); // Load constructor
+    // SimpleNeuralNetwork e(train, 2, 0.25, true) // Train constructor
+    
+    printf("##### Model accuracy: %.2f%c #####\n\n", e.evaluate(test, true) * 100, '%'); // Evaluate model
+    
+    return 0;
+   }
+```
