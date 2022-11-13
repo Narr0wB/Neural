@@ -25,8 +25,7 @@ NOTE: the ImageList objects have the [] operator overloaded, meaning that they c
 
 ## Examples
 
-```
-
+```cpp
 #include <iostream>
 #include "neural.h"
 #include "cudalinear/linalg.h"
