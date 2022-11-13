@@ -26,6 +26,7 @@ NOTE: the ImageList objects have the [] operator overloaded, meaning that they c
 ## Examples
 
 ```cpp
+//#define __GPU_ACCELERAION_CUDA uncomment this to use the GPU
 #include <iostream>
 #include "neural.h"
 #include "cudalinear/linalg.h"
