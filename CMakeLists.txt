@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(neural LANGUAGES CXX)
+
+set(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR}/build)
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
+set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR})
+
+SET (CMAKE_C_COMPILER_WORKS 1)
+SET (CMAKE_CXX_COMPILER_WORKS 1)
+set (CMAKE_CUDA_COMPILER_WORKS 1)
+
+add_compile_options(-g -Wall -O3)
+add_subdirectory(src)
+

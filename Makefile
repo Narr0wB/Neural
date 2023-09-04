@@ -1,9 +1,9 @@
 all: compile run
 
 compile:
-	nvcc main.cpp image.cpp neural.cpp cudalinear/linalg.cpp cudalinear/cudalinear.cu -o test
+	nvcc -O3 main.cpp image.cpp neural.cpp convneural.cpp Conv2D.cpp cudalinear/linalg.cpp cudalinear/cudalinear.cu -g -o test
 
 run:
-	./test.exe
+	./test
 
 .PHONY: all run
