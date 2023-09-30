@@ -6,17 +6,20 @@
 #include <chrono>
 
 #include "image.h"
+#include "linalg/linalg.h"
 
 typedef double** HPDOUBLE; // Host Pointer (DOUBLE)
 typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
 
-//#define __GPU_ACCELERATION_CUDA
+
+#define DEBUG_COPY(x) Matrix{copyDeviceToHost(x), x.rows, x.cols}
+#define DEBUG_COPY_DEVICE(x) copyHostToDevice(x.getdata(), x.rows(), x.cols())
 
 #ifdef __GPU_ACCELERATION_CUDA
 
-#include "cudalinear/cudalinear.h"
+#include "linalg/cudalinear.h"
 
-inline double MSE(DeviceMatrix subtracted);
+inline double MSE(DMATRIX subtracted);
 
 #endif
 
@@ -32,8 +35,10 @@ struct SimpleNeuralNetwork
         Matrix B1; // A1 -> A2 Biases
 
 #ifdef __GPU_ACCELERATION_CUDA
-        std::vector<DeviceImage> allocBatch(std::vector<Image> data_set, size_t batch_number, size_t batch_size);
-        void freeBatch(DeviceImage first);
+        DPDOUBLE allocBatch(size_t batch_size);
+        std::vector<DIMAGE> copyBatch(std::vector<Image>& data_set, size_t batch_number, DPDOUBLE batch_data, size_t batch_size);
+        
+        void freeBatch(DPDOUBLE batch_data);
 #endif
 
     public:

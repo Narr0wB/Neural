@@ -7,144 +7,164 @@ void SimpleNeuralNetwork::train(std::vector<Image> data_set, size_t epochs, doub
     std::chrono::steady_clock::time_point start;
     size_t batch_time;
 
+    if (data_set.size() < batch_size)
+    {
+        batch_size = data_set.size();
+    }
+
     #ifdef __GPU_ACCELERATION_CUDA
     // Layer 0 INPUT ------------------
-    DeviceMatrix _A0;
-    DeviceMatrix _W0(W0);
-    DeviceMatrix _B0(B0);
+    DMATRIX _A0 = DMatrixCreate(28 * 28, 1);;
+    DMATRIX _W0 = copyHostToDevice(W0.getdata(), W0.rows(), W0.cols());
+    DMATRIX _B0 = copyHostToDevice(B0.getdata(), B0.rows(), B0.cols());
 
-    DeviceMatrix _dW0(W0);
-    DeviceMatrix _dB0(B0);
+    DMATRIX _dW0 = DMatrixCreate(W0.rows(), W0.cols());
+    DMATRIX _dB0 = DMatrixCreate(B0.rows(), B0.cols());
 
-    // Layer 1 ------------------------
-    DeviceMatrix _A1(W1.cols(), 1);
-    DeviceMatrix _W1(W1);
-    DeviceMatrix _B1(B1);
+    // Layer 1 HIDDEN -----------------
+    DMATRIX _A1 = DMatrixCreate(W1.cols(), 1);
+    DMATRIX _Z1 = DMatrixCreate(W1.cols(), 1);
+    DMATRIX _W1 = copyHostToDevice(W1.getdata(), W1.rows(), W1.cols());
+    DMATRIX _B1 = copyHostToDevice(B1.getdata(), B1.rows(), B1.cols());;
 
-    DeviceMatrix _Z1(W1.cols(), 1);
-    DeviceMatrix _dW1(W1);
-    DeviceMatrix _dB1(B1);
+    DMATRIX _dW1 = DMatrixCreate(W1.rows(), W1.cols());
+    DMATRIX _dB1 = DMatrixCreate(B1.rows(), B1.cols());
 
     // Layer 2 OUTPUT -----------------
-    DeviceMatrix _A2(W1.rows(), 1);
-    
-    DeviceMatrix _Z2(W1.rows(), 1);
-    DeviceMatrix _label;
+    DMATRIX _A2 = DMatrixCreate(W1.rows(), 1);
+    DMATRIX _Z2 = DMatrixCreate(W1.rows(), 1);
 
-    std::vector<DeviceImage> batch;
+    // TEMP VARS ----------------------
+    DMATRIX _temp_W1_transposed = DMatrixCreate(W1.cols(), W1.rows());
+    DMATRIX _temp_A1 = DMatrixCreate(W1.cols(), 1);
+
+    
+    DPDOUBLE batch_memory = allocBatch(batch_size);
+    std::vector<DIMAGE> batch;
+
+    #else
+
+    Matrix E;
+
+    #endif // __GPU_ACCELERATION_CUDA
+
     size_t batches = data_set.size() / batch_size;
     if (data_set.size() % batch_size != 0) batches++;
 
-    #endif // __GPU_ACCELERATION_CUDA
 
     for (size_t j = 0; j < epochs; j++)
     {
         printf("\n");
 
-    #ifdef __GPU_ACCELERATION_CUDA
         for (size_t b = 0; b < batches; ++b) {
-            batch = allocBatch(data_set, batches * batch_size, batch_size);
-            for (size_t i = 0; i < batch_size; i++)
-            {              
-                // Flatten image data into a big one-dimensional vector
-                _A0.set(batch[i].image, 28 * 28, 1);
+            start = std::chrono::steady_clock::now();
 
+    #ifdef __GPU_ACCELERATION_CUDA
+            batch = copyBatch(data_set, b * batch_size, batch_memory, batch_size);
+            
+            for (size_t i = 0; i < batch.size(); i++)
+            {              
+                DMATRIX transposed_A0 = batch[i].image;
+                
+                DMatrixTranspose(transposed_A0, _A0);
+                
                 // Propagate to the first layer (Hidden layer)
+                cudaMemset(_Z1.data, 0, _Z1.rows * _Z1.cols * sizeof(double));
                 denseForwardProp(_Z1, _W0, _A0, _B0);
-                _Z1.apply(_A1, SIGMOID);
+                DMatrixApply(_Z1, _A1, SIGMOID);
                 
                 // Propagate to the second layer (Output layer)
-                denseForwardProp(_A2, _W1, _A1, _B1);
-                _Z2.apply(_A2, SIGMOID);
+                cudaMemset(_Z2.data, 0, _Z2.rows * _Z2.cols * sizeof(double));
+                denseForwardProp(_Z2, _W1, _A1, _B1);
+                DMatrixApply(_Z2, _A2, SIGMOID);
 
-                _label.set(batch[i].label, 10, 1);
-                _A2.subtract(_label);
-                      
+                // Backpropagate the first layer
+                DMatrixSubtract(_A2, batch[i].label, _A2);
                 denseBackProp(_dW1, _dB1, _A2, _Z2, _A1, SIGMOID_DERIVATIVE);
 
-                DeviceMatrix dotted = _W1.transpose() * _A2;
-                denseBackProp(_dW0, _dB0, dotted, _Z1, _A1, SIGMOID_DERIVATIVE);
+                // Backpropagate the second layer
+                DMatrixTranspose(_W1, _temp_W1_transposed);
+                DMatrixDot(_temp_W1_transposed, _A2, _temp_A1);
 
-                _dW0.scale(alpha);
-                _W0.subtract(_dW0);
+                denseBackProp(_dW0, _dB0, _temp_A1, _Z1, _A0, SIGMOID_DERIVATIVE);
+                          
+                // Apply the gradients to the weights and biases
+                DMatrixScale(_dW0, _dW0, alpha);
+                DMatrixSubtract(_W0, _dW0, _W0);
 
-                _dB0.scale(alpha);
-                _B0.subtract(_dB0);
+                DMatrixScale(_dB0, _dB0, alpha);
+                DMatrixSubtract(_B0, _dB0, _B0);
 
-                _dW1.scale(alpha);
-                _W1.subtract(_dW1);
+                DMatrixScale(_dW1, _dW1, alpha);
+                DMatrixSubtract(_W1, _dW1, _W1);
 
-                _dB1.scale(alpha);
-                _B1.subtract(_dB1);
-
+                DMatrixScale(_dB1, _dB1, alpha);
+                DMatrixSubtract(_B1, _dB1, _B1);
             }
+
             if (verbose)
             {
                 auto stop = std::chrono::steady_clock::now();
                 batch_time = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
-                printf("\repoch: %zd/%zd | batch: %zd/%zd | Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)", j+1, epochs, batch, batches, MSE(_A2), batch_time, batch_size);
+                printf("\repoch: %zd/%zd | batch: %zd/%zd | Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)", j+1, epochs, b+1, batches, MSE(_A2), batch_time, batch_size);
             }
-            freeBatch(batch[0]);
-        }
-        
-        
-        W0.setdata(_W0.toHost(), _W0.rows(), _W0.cols());
-        B0.setdata(_B0.toHost(), _B0.rows(), _B0.cols());
-        W1.setdata(_W1.toHost(), _W1.rows(), _W1.cols());
-        B1.setdata(_B1.toHost(), _B1.rows(), _B1.cols());
 
-        // dMatFree(d_W0);
-        // dMatFree(d_B0);
-        // dMatFree(d_W1);
-        // dMatFree(d_B1);
-        // dMatFree(velW0);
-        // dMatFree(velB0);
-        // dMatFree(velW1);
-        // dMatFree(velB1);
+            
 
         #else
 
-        size_t counter = 0;
-        for (size_t i = 0; i < data_set.size(); i++, counter++)
-        {   
-            if (counter == 1)
-                start = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < batch_size; i++)
+            {   
+                // Flatten image data into a big one-dimensional vector
+                Matrix A0 = data_set[b * batch_size + i].image_data.flatten(COLUMN, COLUMN_FLATTEN);
 
-            // Flatten image data into a big one-dimensional vector
-            Matrix A0 = (data_set[i].image_data).flatten(ROW_FLATTEN);
+                // Propagate to the first layer (Hidden layer)
+                Matrix Z1 = (W0 * A0) + B0;
+                Matrix A1 = Z1.apply(sigmoid);
 
-            // Propagate to the first layer (Hidden layer)
-            Matrix Z1 = (W0 * A0) + B0;
-            Matrix A1 = Z1.apply(sigmoid);
+                // Propagate to the second layer (Output layer)
+                Matrix Z2 = (W1 * A1) + B1;
+                Matrix A2 = Z2.apply(sigmoid);
 
-            // Propagate to the second layer (Output layer)
-            Matrix Z2 = (W1 * A1) + B1;
-            Matrix A2 = Z2.apply(sigmoid);
+                // Calculate error
+                Matrix yhat = one_hot(data_set[b * batch_size + i].label);
 
-            // Calculate error
-            Matrix yhat = one_hot(data_set[i].label);
+                E = (A2 - yhat);
 
-            if (counter == batch_size && verbose)
-            {
-                counter = 0;
-                auto stop = std::chrono::steady_clock::now();
-                batch_time = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
-                printf("\repoch: %zd/%zd | batch: %zd/%zd | Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)", j+1, epochs, i / batch_size, data_set.size() / batch_size, mean((A2 - yhat).apply([](double in){return in * in;})), batch_time, batch_size);
+                Matrix dW1 = hadamard(Z2.apply(sigmoid_d), (A2 - yhat)) * A1.transpose();
+                Matrix dB1 = hadamard(Z2.apply(sigmoid_d), (A2 - yhat));
+                Matrix dW0 = hadamard(Z1.apply(sigmoid_d), W1.transpose() * (A2 - yhat)) * A0.transpose();
+                Matrix dB0 = hadamard(Z1.apply(sigmoid_d), W1.transpose() * (A2 - yhat));
+
+                W0 = W0 - (alpha * dW0);
+                W1 = W1 - (alpha * dW1);
+                B0 = B0 - (alpha * dB0);
+                B1 = B1 - (alpha * dB1);
+
             }
 
-            Matrix dW1 = hadamard(Z2.apply(sigmoid_d), (A2 - yhat)) * A1.transpose();
-            Matrix dB1 = hadamard(Z2.apply(sigmoid_d), (A2 - yhat));
-            Matrix dW0 = hadamard(Z1.apply(sigmoid_d), W1.transpose() * (A2 - yhat)) * A0.transpose();
-            Matrix dB0 = hadamard(Z1.apply(sigmoid_d), W1.transpose() * (A2 - yhat));
-            
-            W0 = W0 - (alpha * dW0);
-            W1 = W1 - (alpha * dW1);
-            B0 = B0 - (alpha * dB0);
-            B1 = B1 - (alpha * dB1);
-        }
-
+            if (verbose)
+            {
+                auto stop = std::chrono::steady_clock::now();
+                batch_time = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
+                printf("\repoch: %zd/%zd | batch: %zd/%zd | Error: %f (MSE) | speed: %zdms/batch (batch size: %zd)", j+1, epochs, b+1, batches, mean(E.apply([](double in) {return pow(in, 2);})), batch_time, batch_size);
+            }
         #endif
+
+            
+        }
+        
     }
+
+#ifdef __GPU_ACCELERATION_CUDA
+    freeBatch(batch_memory);
+
+    W0.setdata(copyDeviceToHost(_W0), _W0.rows, _W0.cols);
+    B0.setdata(copyDeviceToHost(_B0), _B0.rows, _B0.cols);
+    W1.setdata(copyDeviceToHost(_W1), _W1.rows, _W1.cols);
+    B1.setdata(copyDeviceToHost(_B1), _B1.rows, _B1.cols);
+#endif
+
     auto train_stop = std::chrono::steady_clock::now();
     double epoch_time = (double) std::chrono::duration_cast<std::chrono::seconds>(train_stop - train_start).count() / epochs;
     if (verbose)
@@ -152,38 +172,49 @@ void SimpleNeuralNetwork::train(std::vector<Image> data_set, size_t epochs, doub
 }
 
 #ifdef __GPU_ACCELERATION_CUDA
-std::vector<DeviceImage> SimpleNeuralNetwork::allocBatch(std::vector<Image> data_set, size_t offset, size_t batch_size)
-{
-    if (offset > data_set.size())
-        ERR("[ERROR] (SimpleNeuralNetwork::allocBatch) Invalid batch numbers!");
-
-    batch_size = std::min(batch_size, data_set.size() - offset);
+DPDOUBLE SimpleNeuralNetwork::allocBatch(size_t batch_size) {
     DPDOUBLE batch_data;
-    
-    std::vector<DeviceImage> device_images(batch_size);
 
     if (cudaMalloc(&batch_data, (28 * 28 + 10) * sizeof(double) * batch_size) != cudaSuccess)
         ERR("[ERROR] (SimpleNeuralNetwork::allocBatch) Could not allocate GPU memory!");
 
-    for (size_t i = 0; i < batch_size; ++i) {
+    return batch_data;
+}
+
+std::vector<DIMAGE> SimpleNeuralNetwork::copyBatch(std::vector<Image>& data_set, size_t offset, DPDOUBLE batch_data, size_t batch_size)
+{
+    if (offset > data_set.size())
+        ERR("[ERROR] (SimpleNeuralNetwork::copyBatch) Invalid batch numbers!");
+
+    if (batch_data == NULL) {
+        ERR("[ERROR] (SimpleNeuralNetwork::copyBatch) batch_data NULL!");
+    }
+
+    batch_size = std::min(batch_size, data_set.size() - offset);
+    
+    std::vector<DIMAGE> device_images;
+
+    for (size_t i = 0; i < batch_size; ++i) { 
         DPDOUBLE image_data = batch_data + ((28 * 28 + 10) * i);
         DPDOUBLE label_data = batch_data + ((28 * 28 + 10) * i) + 28 * 28;
 
-        if (cudaMemcpy(image_data, data_set[offset + i].image_data.flatten(COLUMN_FLATTEN).getdata()[0], 28 * 28, cudaMemcpyHostToDevice) != cudaSuccess)
-            ERR("[ERROR] (SimpleNeuralNetwork::allocBatch) Could not copy from Host to Device memory!");
+        __hostToDeviceData(data_set[offset + i].image_data.flatten(ROW, COLUMN_FLATTEN).getdata(), image_data, 1, 28*28);
+        __hostToDeviceData(one_hot(data_set[offset + i].label).flatten(ROW, ROW_FLATTEN).getdata(), label_data, 1, 10);
         
-        if (cudaMemcpy(label_data, one_hot(data_set[offset + i].label).flatten(COLUMN_FLATTEN).getdata()[0], 10, cudaMemcpyHostToDevice) != cudaSuccess)
-            ERR("[ERROR] (SimpleNeuralNetwork::allocBatch) Could not copy from Host to Device memory!");
+        DMATRIX image{image_data, 1, 28*28};
+        DMATRIX label{label_data, 10, 1};
 
-        device_images.push_back({.image = image_data, .label = label_data});
+        DIMAGE d_image{image, label};
+
+        device_images.push_back(d_image);
     }
 
     return device_images;
 }
 
-void SimpleNeuralNetwork::freeBatch(DeviceImage first)
+void SimpleNeuralNetwork::freeBatch(DPDOUBLE batch_data)
 {
-    if (cudaFree(first.image) != cudaSuccess)
+    if (cudaFree(batch_data) != cudaSuccess)
         ERR("[ERROR] (SimpleNeuralNetwork::freeBatch) Could not free GPU memory!");
 }
 #endif // __GPU_ACCELERATION_CUDA
@@ -212,9 +243,11 @@ double SimpleNeuralNetwork::evaluate(std::vector<Image> data_set, bool verbose, 
             auto stop = std::chrono::steady_clock::now();
             auto batch_time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start).count();
 
-            if (verbose)
-                printf("\r%zd/%zd %zdms/batch (batch size: %zd)", i+1, data_set.size(), batch_time_elapsed, batch_size);
-                
+            if (verbose) {
+                printf("\r                                                                                                 ");
+                printf("\rbatch: %.0f/%.0f | Accuracy: %0.2f %% | speed: %zdms/batch (batch size: %zd)", ceil(i / batch_size) + 1, ceil(data_set.size() / batch_size), (float)correct/i * 100.0f, batch_time_elapsed, batch_size);
+            }
+
             time_elapsed += batch_time_elapsed;
         }
     }
@@ -233,7 +266,7 @@ Matrix SimpleNeuralNetwork::run(Image i)
 {
     
     // Flatten image data into a big one-dimensional vector
-    Matrix A0 = i.image_data.flatten(ROW_FLATTEN);
+    Matrix A0 = i.image_data.flatten(COLUMN, COLUMN_FLATTEN);
 
     // Propagate to the first layer (Hidden layer)
     Matrix Z1 = (W0 * A0) + B0;
@@ -317,11 +350,11 @@ void SimpleNeuralNetwork::load(const char* path)
 }
 
 #ifdef __GPU_ACCELERATION_CUDA
-double MSE(DeviceMatrix subtracted)
+double MSE(DMATRIX subtracted)
 {
     Matrix hB(10, 1);
 
-    hB.setdata(subtracted.toHost(), subtracted.rows(), subtracted.cols());
+    hB.setdata(copyDeviceToHost(subtracted), subtracted.rows, subtracted.cols);
 
     return mean(hB.apply([](double in) {return pow(in, 2);}));
 }

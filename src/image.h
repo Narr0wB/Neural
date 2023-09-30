@@ -8,7 +8,7 @@
 #include <string.h>
 #include <sstream>
 
-#include "cudalinear/linalg.h"
+#include "linalg/linalg.h"
 
 #define MAX_BUFFER 10000
 
