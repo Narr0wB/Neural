@@ -3,9 +3,9 @@ GPU-Accelerated (NVIDIA gpus only) simple ANN made for the mnist dataset (handwr
 
 To use this model you will need the csv versions of the mnist datasets available at [Here](https://www.kaggle.com/datasets/oddrationale/mnist-in-csv) and put them in the same dir of the source files
 
-In order to train the network you will need the make command [Make](https://stat545.com/make-windows.html) and the NVIDIA CUDA Toolkit [CUDA](https://developer.nvidia.com/cuda-toolkit)
+In order to train the network you will need the NVIDIA CUDA Toolkit [CUDA](https://developer.nvidia.com/cuda-toolkit)
 
-Once you have installed both make and the CUDA toolkit you can run the example (in main.cpp) by typing in the terminal make compile, then ./test
+Once you have installed both make and the CUDA toolkit you can run the example (in main.cpp) by using the makefile in /build and then running the ./neural executable
 
 If you just want to test the accuracy of the pretrained modes, namely "testNeMk0pLR.nn", or train using the CPU you will not need the cuda toolkit but just a C/C++ compiler
 
