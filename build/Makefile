@@ -1,27 +1,19 @@
 ifeq ($(__CUDA), 1)
 
 CC=nvcc
-CUDALINEAR= ../src/linalg/cudalinear.cu \
+LINEAR= ../src/linalg/cudalinear.cu \
 	../src/linalg/linalg.cpp
-CUDADEFINE= __GPU_ACCELERATION_CUDA
-CUDAFLAGS=-arch=compute_61
+CFLAGS = -O3 -arch=compute_61 -D__GPU_ACCELERATION_CUDA
 
 else 
 
 CC=g++
-CUDALINEAR= ../src/linalg/linalg.cpp
-CUDADEFINE= __CPU
-CUDAFLAGS= 
+LINEAR= ../src/linalg/linalg.cpp
+CFLAGS = -O3 -D__CPU
 
 endif
-
-
-CFLAGS = -O3
 
 all: build
 
 build:
-	$(CC) $(CFLAGS) $(CUDALINEAR) ../src/image.cpp ../src/neural.cpp ../src/main.cpp -D$(CUDADEFINE) -o neural $(CUDAFLAGS)
-
-run: neural
-	neural.exe
+	$(CC) $(CFLAGS) $(LINEAR) ../src/*.cpp -o neural
