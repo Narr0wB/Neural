@@ -1,24 +1,121 @@
+
 # Neural
 GPU-Accelerated (NVIDIA gpus only) simple ANN made for the mnist dataset (handwritten digits)
 
-To use this model you will need the csv versions of the mnist datasets available at [Here](https://www.kaggle.com/datasets/oddrationale/mnist-in-csv) and put them in the same dir of the source files
+## Setting up
+To build and test out this project you will need to follow a couple of steps:
+- First, make sure you have installed the following essential tools:
+```bash
+>$ make
+>$ g++
+```
+- Unzip the mnist_test.zip file datasets present in the ```datasets/``` directory 
 
-In order to train the network you will need the NVIDIA CUDA Toolkit [CUDA](https://developer.nvidia.com/cuda-toolkit)
+- In order to train/use the neural network using the GPU you will need to install the [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
 
-Once you have installed both make and the CUDA toolkit you can run the example (in main.cpp) by using the makefile in /build and then running the ./neural executable
 
-If you just want to test the accuracy of the pretrained modes, namely "testNeMk0pLR.nn", or train using the CPU you will not need the cuda toolkit but just a C/C++ compiler
-
+## Build
+Once you have installed the required tools and set up the environment you are now ready to build the project. Just navigate to the build directory and run the Makefile:
+```bash
+>$ cd build/
+>$ make __CUDA=1 # or set to 0 to disable GPU
+```
 
 ## Usage
 
-Load the train and test datasets by using the function in the Image module `ImageList csv_to_image(const char* path, int n_of_imgs)`
-Then create a SimpleNeuralNetwork object and either pass the constructor the path of a pretrained module (.nn files) or use the train constructor `SimpleNeuralNetwork(ImageList data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100)`
+Load the train and test datasets by using the function `ImageList csv_to_image(const char* path, int n_of_imgs)`,
+then create a SimpleNeuralNetwork object and use one of the two contructors, the train constructor:
 
-NOTE: If you have trained a model you can save its data by using the function `void SimpleNeuralNetwork::save(const char* path)` and making sure to add .nn as the file's extension
+```cpp
+SimpleNeuralNetwork(std::vector<Image> data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100
+```
 
-NOTE #2: If you dont have a NVIDIA GPU comment out in neural.h(10) the define __GPU_ACCELERATION_CUDA to train on the CPU
+Or the pretrained module constructor:
 
-Once trained / loaded the model, you can either evaluate the accuracy of the model using the member function `double evaluate(ImageList data_set, bool verbose)` passing in the train dataset or run a single image by using `void SimpleNeuralNetwork::run_visual(Image* i)`
+```cpp
+SimpleNeuralNetwork(const char* path)
+```
+(Pretrained modules are available in the ```pretrained/``` directory)
+##
+After having loaded the datasets and created the NN all is left is to test it!
+You can either test the model accuracy over a specific dataset:
 
-NOTE: the ImageList objects have the [] operator overloaded, meaning that they can return an Image* if given a valid index (e.g `Image* test = train[1]`), which in turn can be used with `void SimpleNeuralNetwork::run_visual(Image* i)`
+```cpp
+SimpleNeuralNetwork snn("../pretrained/model20e60k0p28.nn");
+std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000);
+
+printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
+```
+
+Or you can pass it a single image and see the model's prediction:
+
+```cpp
+SimpleNeuralNetwork snn("../pretrained/model20e60k0p28.nn");
+std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000);
+
+snn.run_visual(test[0])
+
+/*
+Expected output:
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+. . . . . . : * ! ! ~ - . . . . . . . . . . . . . . . . 
+. . . . . . $ @ @ @ @ $ # # # # # # # # ! - . . . . . . 
+. . . . . . ~ ; ~ ; ! $ @ $ @ @ @ @ $ @ @ = . . . . . . 
+. . . . . . . . . . . , ~ , ~ ~ ~ ~ , $ @ ; . . . . . . 
+. . . . . . . . . . . . . . . . . . : @ # , . . . . . . 
+. . . . . . . . . . . . . . . . . , $ @ : . . . . . . . 
+. . . . . . . . . . . . . . . . . = @ $ - . . . . . . . 
+. . . . . . . . . . . . . . . . ~ @ @ ~ . . . . . . . . 
+. . . . . . . . . . . . . . . . = @ * . . . . . . . . . 
+. . . . . . . . . . . . . . . . # @ ~ . . . . . . . . . 
+. . . . . . . . . . . . . . . ; @ * . . . . . . . . . . 
+. . . . . . . . . . . . . . ~ @ $ - . . . . . . . . . . 
+. . . . . . . . . . . . . , $ @ ! . . . . . . . . . . . 
+. . . . . . . . . . . . . # @ # - . . . . . . . . . . . 
+. . . . . . . . . . . . - @ @ ~ . . . . . . . . . . . . 
+. . . . . . . . . . . , $ @ ; . . . . . . . . . . . . . 
+. . . . . . . . . . . = @ @ - . . . . . . . . . . . . . 
+. . . . . . . . . . ~ $ @ @ - . . . . . . . . . . . . . 
+. . . . . . . . . . ; @ @ # - . . . . . . . . . . . . . 
+. . . . . . . . . . ; @ # , . . . . . . . . . . . . . . 
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
+Label: 7
+
+The model predicted: 7
+*/
+```
+
+
+Lastly, once you have trained a model you have the possibility to save the parameters to disk:
+```cpp
+std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000);
+    
+SimpleNeuralNetwork snn(train, 1, 0.28, true, 100); // Train constructor
+
+snn.save("/path/to/save.nn");
+```
+##
+Here is a simple main.cpp :
+
+main.cpp:
+```cpp
+#include <iostream>
+#include "neural.h"
+
+int main(int argc, char** argv) {
+
+    std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000); // MAX IMGS -> 60,000
+    std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000); // MAX IMGS -> 10,000
+
+    // TRAIN ----------------------------------------------------------------------------------
+    
+    SimpleNeuralNetwork e(train, 1, 0.28, true, 100); // Train constructor
+	printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
+}
+```

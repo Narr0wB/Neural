@@ -1,6 +1,5 @@
 #include <iostream>
 #include "neural.h"
-#include "linalg/linalg.h"
 
 int main(int argc, char** argv) {
 
@@ -9,26 +8,20 @@ int main(int argc, char** argv) {
 
     // TRAIN ----------------------------------------------------------------------------------
     
-    SimpleNeuralNetwork e(train, 1, 0.28, true, 100); // Train constructor
+    SimpleNeuralNetwork snn(train, 1, 0.28, true, 100); // Train constructor
 
     // To save a trained model
-    //e.save("testmodel.nn");
+    // snn.save("testmodel.nn");
 
     // LOAD -----------------------------------------------------------------------------------
 
-    //SimpleNeuralNetwork e("../pretrained/model20e60k0p28.nn"); // Load constructor
+    // SimpleNeuralNetwork e("../pretrained/model20e60k0p28.nn"); // Load constructor
     
     // To run a single image and get the output of the network (Loaded model) where the index of the list is taken from the user (argv arguments)
-    // e.run_visual(test[argv[1]])
-
-    
-
-    
+    snn.run_visual(test[0]);
 
     // Test the accuracy of the model
-    printf("##### Model accuracy: %.2f%c #####\n\n", e.evaluate(test, true) * 100, '%');
-
-    
+    printf("##### Model accuracy: %.2f%c #####\n\n", snn.evaluate(test, true) * 100, '%');
 
     return 0;
 }

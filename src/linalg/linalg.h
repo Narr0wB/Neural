@@ -8,6 +8,7 @@
 #include <chrono>
 #include <iostream>
 #include <iomanip>
+#include <cstring>
 
 #define COLUMN_FLATTEN 104
 #define ROW_FLATTEN 103
