@@ -116,6 +116,6 @@ int main(int argc, char** argv) {
     // TRAIN ----------------------------------------------------------------------------------
     
     SimpleNeuralNetwork e(train, 1, 0.28, true, 100); // Train constructor
-	printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
+    printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
 }
 ```
