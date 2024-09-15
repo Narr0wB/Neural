@@ -15,7 +15,7 @@ To build and test out this project you will need to follow a couple of steps:
 
 
 ## Build
-Once you have installed the required tools and set up the environment you are now ready to build the project. Just navigate to the build directory and run the Makefile:
+Once you have installed the required tools and set up the environment you are ready to build the project. Just navigate to the build directory and run the Makefile:
 ```bash
 >$ cd build/
 >$ make __CUDA=1 # or set to 0 to disable GPU
@@ -24,20 +24,20 @@ Once you have installed the required tools and set up the environment you are no
 ## Usage
 
 Load the train and test datasets by using the function `ImageList csv_to_image(const char* path, int n_of_imgs)`,
-then create a SimpleNeuralNetwork object and use one of the two contructors, the train constructor:
+then create a SimpleNeuralNetwork object and use one of the two constructors, the train constructor:
 
 ```cpp
 SimpleNeuralNetwork(std::vector<Image> data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100
 ```
 
-Or the pretrained module constructor:
+Or the pre-trained module constructor:
 
 ```cpp
 SimpleNeuralNetwork(const char* path)
 ```
-(Pretrained modules are available in the ```pretrained/``` directory)
+(Pretrained modules are available in the ```pre-trained/``` directory)
 ##
-After having loaded the datasets and created the NN all is left is to test it!
+After having loaded the datasets and created the NN all that's left is to test it!
 You can either test the model accuracy over a specific dataset:
 
 ```cpp
@@ -92,7 +92,7 @@ The model predicted: 7
 ```
 
 
-Lastly, once you have trained a model you have the possibility to save the parameters to disk:
+Lastly, once you have trained a model you can save the parameters to disk:
 ```cpp
 std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000);
     
