@@ -8,7 +8,7 @@
 #include <string.h>
 #include <sstream>
 
-#include "linalg/linalg.h"
+#include "linalg/linalg.hpp"
 
 #define MAX_BUFFER 10000
 

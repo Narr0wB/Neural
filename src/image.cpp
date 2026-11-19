@@ -1,5 +1,5 @@
 
-#include "image.h"
+#include "image.hpp"
 
 std::ostream& operator<<(std::ostream& os, Image& img)
 {

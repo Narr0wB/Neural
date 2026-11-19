@@ -106,7 +106,7 @@ Here is a simple main.cpp :
 main.cpp:
 ```cpp
 #include <iostream>
-#include "neural.h"
+#include "neural.hpp"
 
 int main(int argc, char** argv) {
 

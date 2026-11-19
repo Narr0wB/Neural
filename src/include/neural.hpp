@@ -5,8 +5,8 @@
 #include <fstream>
 #include <chrono>
 
-#include "image.h"
-#include "linalg/linalg.h"
+#include "image.hpp"
+#include "linalg/linalg.hpp"
 
 typedef double** HPDOUBLE; // Host Pointer (DOUBLE)
 typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
@@ -17,7 +17,7 @@ typedef double* DPDOUBLE; // Device Pointer (DOUBLE)
 
 #ifdef __GPU_ACCELERATION_CUDA
 
-#include "linalg/cudalinear.h"
+#include "linalg/cudalinear.hpp"
 
 inline double MSE(DMATRIX subtracted);
 

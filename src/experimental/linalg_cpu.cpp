@@ -1,5 +1,5 @@
 
-#include "linalg_cpu.h"
+#include "experimental/linalg_cpu.hpp"
 
 int Matrix::resize(int newR, int newC)
 {

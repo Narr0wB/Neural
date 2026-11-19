@@ -5,10 +5,10 @@
 #include <fstream>
 #include <chrono>
 
-#include "cudalinear/linalg.h"
-#include "image.h"
-#include "Conv2D.h"
-#include "neural.h"
+#include "linalg/linalg.hpp"
+#include "image.hpp"
+#include "experimental/Conv2D.hpp"
+#include "neural.hpp"
 
 struct ConvNN
 {

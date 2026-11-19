@@ -2,7 +2,7 @@
 #ifndef CONV2D_H
 #define CONV2D_H
 
-#include "cudalinear/linalg.h"
+#include "linalg/linalg.hpp"
 
 #define VALID 0
 #define SAME 1

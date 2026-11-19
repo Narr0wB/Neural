@@ -7,7 +7,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
-#include "linalg.h"
+#include "linalg/linalg.hpp"
 
 #define ERR(msg) {std::cerr << msg << std::endl; exit(EXIT_FAILURE);}
 

@@ -1,5 +1,5 @@
 
-#include "linalg.h"
+#include "linalg/linalg.hpp"
 
 int Matrix::resize(size_t new_rows, size_t new_cols)
 {

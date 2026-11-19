@@ -1,5 +1,5 @@
 
-#include "cudalinear.h"
+#include "linalg/cudalinear.hpp"
 #include <cuda.h>
 
 #define MAX_THREADS 16384

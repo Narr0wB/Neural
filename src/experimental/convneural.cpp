@@ -1,5 +1,5 @@
 
-#include "convneural.h"
+#include "experimental/convneural.hpp"
 
 void ConvNN::train(ImageList data_set, size_t epochs, double alpha, bool verbose, size_t batch_size)
 {

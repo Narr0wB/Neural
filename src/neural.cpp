@@ -1,5 +1,5 @@
 
-#include "neural.h"
+#include "neural.hpp"
 
 void SimpleNeuralNetwork::train(std::vector<Image> data_set, size_t epochs, double alpha, bool verbose, size_t batch_size)
 {
