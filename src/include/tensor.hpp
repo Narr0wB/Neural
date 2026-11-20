@@ -27,6 +27,9 @@
 template <typename T>
 concept Numeric = std::is_arithmetic_v<T>;
 
+typedef float  fp32;
+typedef double fp64;
+
 inline constexpr size_t MAX_DIMS = 4;
 
 // Plain array instead of std::array so it can be used inside CUDA kernels.
