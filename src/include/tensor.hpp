@@ -15,6 +15,16 @@
 
 #ifdef __GPU_ACCELERATION_CUDA
 #include <cuda_runtime.h>
+
+// Kernel launches return nothing: call CUDA_CHECK(cudaGetLastError()) after one.
+#define CUDA_CHECK(call)                                                        \
+    do {                                                                        \
+        cudaError_t err_ = (call);                                              \
+        if (err_ != cudaSuccess)                                                \
+            throw std::runtime_error(std::string("CUDA error: ") +              \
+                                     cudaGetErrorString(err_) + " at " +        \
+                                     __FILE__ + ":" + std::to_string(__LINE__)); \
+    } while (0)
 #endif
 
 // Only defined as __host__ __device__ when compiled as CUDA by nvcc.
@@ -108,6 +118,12 @@ inline std::mt19937& rng()
 }
 } // namespace detail
 
+
+enum class Device {
+    CPU,
+    CUDA
+};
+
 // Copies are shallow: `Tensor b = a;` shares a's buffer, and so do slice(),
 // reshape() and flatten(). Use clone() for an independent copy.
 template <Numeric T>
@@ -115,55 +131,122 @@ class Tensor {
 private:
     std::shared_ptr<T[]> data;
     Shape shape_;
+    Device device_ = Device::CPU;
 
-    Tensor(std::shared_ptr<T[]> buf, const Shape& s) : data(std::move(buf)), shape_(s) {}
+    Tensor(std::shared_ptr<T[]> buf, const Shape& s, Device dev) : data(std::move(buf)), shape_(s), device_(dev) {}
 
 public:
     Tensor() = default;
 
     // Zero-filled.
+    explicit Tensor(Device dev, const Shape& s) : shape_(s), device_(dev)
+    {
+        if (device_ == Device::CUDA) {
+#ifdef __GPU_ACCELERATION_CUDA
+            T* raw_ptr = nullptr;
+            const size_t bytes = size() * sizeof(T);
+            if (bytes > 0) {
+                CUDA_CHECK(cudaMalloc(&raw_ptr, bytes));
+                data = std::shared_ptr<T[]>(raw_ptr, [](T* p) { if (p) cudaFree(p); });
+                CUDA_CHECK(cudaMemset(raw_ptr, 0, bytes));
+            }
+
+            return;
+#else
+            throw std::runtime_error("Tensor: CUDA support not compiled in");
+#endif
+        }
+
+        data = std::make_shared<T[]>(s.size());
+    }
+
+    template <std::integral... D>
+        requires(sizeof...(D) >= 1 && sizeof...(D) <= MAX_DIMS)
+    explicit Tensor(Device dev, D... dims) : Tensor(dev, Shape{static_cast<size_t>(dims)...})
+    {}
+
     explicit Tensor(const Shape& s) : data(std::make_shared<T[]>(s.size())), shape_(s) {}
 
     template <std::integral... D>
         requires(sizeof...(D) >= 1 && sizeof...(D) <= MAX_DIMS)
     explicit Tensor(D... dims) : Tensor(Shape{static_cast<size_t>(dims)...})
-    {
-    }
+    {}
 
-    static Tensor zeros(const Shape& s) { return Tensor(s); }
+    static Tensor zeros(const Shape& s, Device dev = Device::CPU) { return Tensor(dev, s); }
 
-    static Tensor ones(const Shape& s)
+    static Tensor ones(const Shape& s, Device dev = Device::CPU)
     {
         Tensor t(s);
         t.fill(T{1});
-        return t;
+        if (dev == Device::CPU)
+            return t;
+#ifdef __GPU_ACCELERATION_CUDA
+        return t.to(dev);
+#else
+        throw std::runtime_error("Tensor::ones: CUDA support not compiled in");
+#endif
     }
 
-    static Tensor randn(const Shape& s) requires std::floating_point<T>
+    static Tensor randn(const Shape& s, Device dev = Device::CPU) requires std::floating_point<T>
     {
         Tensor t(s);
         std::normal_distribution<T> dist(T{0}, T{1});
         for (size_t i = 0; i < t.size(); ++i)
             t.data[i] = dist(detail::rng());
-        return t;
+        if (dev == Device::CPU)
+            return t;
+#ifdef __GPU_ACCELERATION_CUDA
+        return t.to(dev);
+#else
+        throw std::runtime_error("Tensor::randn: CUDA support not compiled in");
+#endif
     }
 
     const Shape& shape() const { return shape_; }
     size_t ndim() const { return shape_.ndim; }
     size_t dim(size_t i) const { return shape_[i]; }
     size_t size() const { return shape_.size(); }
+    size_t bytes() const { return shape_.size() * sizeof(T); }
+
+    Device device() const { return device_; }
 
     T* raw() { return data.get(); }
     const T* raw() const { return data.get(); }
 
     template <std::integral... I>
-    T& operator()(I... idx) { return data[shape_.offset(idx...)]; }
+    T& operator()(I... idx)
+    {
+        assert(device_ == Device::CPU);
+        return data[shape_.offset(idx...)];
+    }
 
     template <std::integral... I>
-    const T& operator()(I... idx) const { return data[shape_.offset(idx...)]; }
+    const T& operator()(I... idx) const
+    {
+        assert(device_ == Device::CPU);
+        return data[shape_.offset(idx...)];
+    }
 
     TensorView<T> view() { return {data.get(), shape_}; }
     TensorView<const T> view() const { return {data.get(), shape_}; }
+
+#ifdef __GPU_ACCELERATION_CUDA
+    Tensor<T> to(Device dev) const
+    {
+        if (dev == device_) return *this;
+
+        Tensor<T> out(dev, shape_);
+
+        if (bytes() > 0) {
+            switch (dev) {
+                case Device::CPU:  CUDA_CHECK(cudaMemcpy(out.raw(), data.get(), bytes(), cudaMemcpyDeviceToHost)); break;
+                case Device::CUDA: CUDA_CHECK(cudaMemcpy(out.raw(), data.get(), bytes(), cudaMemcpyHostToDevice)); break;
+            }
+        }
+
+        return out;
+    }
+#endif // __GPU_ACCELERATION_CUDA
 
     // Index i along the first dimension, dropping it: for {N, C, H, W},
     // slice(n).slice(c) is the H x W plane.
@@ -181,20 +264,31 @@ public:
 
         // Aliasing constructor: points into the buffer while sharing ownership
         // of all of it, so the parent stays alive as long as the slice does.
-        return Tensor(std::shared_ptr<T[]>(data, data.get() + i * sub.size()), sub);
+        return Tensor(std::shared_ptr<T[]>(data, data.get() + i * sub.size()), sub, device_);
     }
 
     Tensor reshape(const Shape& s) const
     {
         if (s.size() != size())
             throw std::invalid_argument("Tensor::reshape: cannot reshape " + shape_.str() + " to " + s.str());
-        return Tensor(data, s);
+        return Tensor(data, s, device_);
     }
 
     Tensor flatten() const { return reshape({size()}); }
 
     Tensor clone() const
     {
+        if (device_ == Device::CUDA) {
+#ifdef __GPU_ACCELERATION_CUDA
+            Tensor t(Device::CUDA, shape_);
+            const size_t bytes = size() * sizeof(T);
+            if (bytes > 0)
+                CUDA_CHECK(cudaMemcpy(t.raw(), data.get(), bytes, cudaMemcpyDeviceToDevice));
+            return t;
+#else
+            throw std::runtime_error("Tensor::clone: CUDA support not compiled in");
+#endif
+        }
         Tensor t(shape_);
         for (size_t i = 0; i < size(); ++i)
             t.data[i] = data[i];
@@ -203,6 +297,8 @@ public:
 
     void fill(T value)
     {
+        if (device_ != Device::CPU)
+            throw std::runtime_error("Tensor::fill: only supported on CPU tensors");
         for (size_t i = 0; i < size(); ++i)
             data[i] = value;
     }
@@ -211,12 +307,38 @@ public:
         requires std::is_invocable_r_v<T, F, T>
     void apply(F f)
     {
+        if (device_ != Device::CPU)
+            throw std::runtime_error("Tensor::apply: only supported on CPU tensors");
         for (size_t i = 0; i < size(); ++i)
             data[i] = f(data[i]);
     }
 };
 
 namespace detail {
+inline const char* device_name(Device d)
+{
+    switch (d) {
+        case Device::CPU:  return "CPU";
+        case Device::CUDA: return "CUDA";
+    }
+    return "unknown";
+}
+
+template <Numeric T>
+void require_same_device(const Tensor<T>& a, const Tensor<T>& b, const char* op)
+{
+    if (a.device() != b.device())
+        throw std::invalid_argument(std::string(op) + ": tensors are on different devices (" +
+                                    device_name(a.device()) + " vs " + device_name(b.device()) + ")");
+}
+
+template <Numeric T>
+void require_cpu(const Tensor<T>& a, const char* op)
+{
+    if (a.device() != Device::CPU)
+        throw std::runtime_error(std::string(op) + ": CUDA backend not implemented yet");
+}
+
 template <Numeric T>
 void require_same_shape(const Tensor<T>& a, const Tensor<T>& b, const char* op)
 {
@@ -235,6 +357,9 @@ void require_2d(const Tensor<T>& a, const char* op)
 template <Numeric T, typename F>
 void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, const char* op, F f)
 {
+    require_same_device(a, b, op);
+    require_same_device(a, out, op);
+    require_cpu(a, op);
     require_same_shape(a, b, op);
     require_same_shape(a, out, op);
     const T* pa = a.raw();
@@ -254,6 +379,8 @@ void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
 {
+    detail::require_same_device(a, b, "add");
+    detail::require_cpu(a, "add");
     detail::require_same_shape(a, b, "add");
     Tensor<T> out(a.shape());
     add_into(a, b, out);
@@ -269,6 +396,8 @@ void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
 {
+    detail::require_same_device(a, b, "sub");
+    detail::require_cpu(a, "sub");
     detail::require_same_shape(a, b, "sub");
     Tensor<T> out(a.shape());
     sub_into(a, b, out);
@@ -284,6 +413,8 @@ void hadamard_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 {
+    detail::require_same_device(a, b, "hadamard");
+    detail::require_cpu(a, "hadamard");
     detail::require_same_shape(a, b, "hadamard");
     Tensor<T> out(a.shape());
     hadamard_into(a, b, out);
@@ -293,6 +424,8 @@ Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 template <Numeric T>
 void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 {
+    detail::require_same_device(a, out, "scale_into");
+    detail::require_cpu(a, "scale_into");
     detail::require_same_shape(a, out, "scale_into");
     const T* pa = a.raw();
     T* po = out.raw();
@@ -303,6 +436,7 @@ void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> scale(const Tensor<T>& a, T s)
 {
+    detail::require_cpu(a, "scale");
     Tensor<T> out(a.shape());
     scale_into(a, s, out);
     return out;
@@ -311,6 +445,7 @@ Tensor<T> scale(const Tensor<T>& a, T s)
 template <Numeric T>
 T sum(const Tensor<T>& a)
 {
+    detail::require_cpu(a, "sum");
     T total{};
     for (size_t i = 0; i < a.size(); ++i)
         total += a.raw()[i];
@@ -334,6 +469,9 @@ Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 template <Numeric T>
 void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
+    detail::require_same_device(a, b, "matmul_into");
+    detail::require_same_device(a, out, "matmul_into");
+    detail::require_cpu(a, "matmul_into");
     detail::require_2d(a, "matmul_into");
     detail::require_2d(b, "matmul_into");
     detail::require_2d(out, "matmul_into");
@@ -360,6 +498,8 @@ void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
 {
+    detail::require_same_device(a, b, "matmul");
+    detail::require_cpu(a, "matmul");
     detail::require_2d(a, "matmul");
     detail::require_2d(b, "matmul");
     const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
@@ -376,6 +516,8 @@ Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
 template <Numeric T>
 void transpose_into(const Tensor<T>& a, Tensor<T>& out)
 {
+    detail::require_same_device(a, out, "transpose_into");
+    detail::require_cpu(a, "transpose_into");
     detail::require_2d(a, "transpose_into");
     const size_t r = a.dim(0), c = a.dim(1);
     if (!(out.shape() == Shape{c, r}))
@@ -392,130 +534,11 @@ void transpose_into(const Tensor<T>& a, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> transpose(const Tensor<T>& a)
 {
+    detail::require_cpu(a, "transpose");
     detail::require_2d(a, "transpose");
     Tensor<T> out(a.dim(1), a.dim(0));
     transpose_into(a, out);
     return out;
 }
-
-#ifdef __GPU_ACCELERATION_CUDA
-
-// Kernel launches return nothing: call CUDA_CHECK(cudaGetLastError()) after one.
-#define CUDA_CHECK(call)                                                        \
-    do {                                                                        \
-        cudaError_t err_ = (call);                                              \
-        if (err_ != cudaSuccess)                                                \
-            throw std::runtime_error(std::string("CUDA error: ") +              \
-                                     cudaGetErrorString(err_) + " at " +        \
-                                     __FILE__ + ":" + std::to_string(__LINE__)); \
-    } while (0)
-
-// Pass view() to kernels, never the DeviceTensor itself.
-template <Numeric T>
-class DeviceTensor {
-private:
-    T* data_ = nullptr;
-    Shape shape_;
-
-    size_t bytes() const { return shape_.size() * sizeof(T); }
-
-    void release()
-    {
-        // Destructors must not throw, so errors from cudaFree are ignored.
-        if (data_)
-            cudaFree(data_);
-        data_ = nullptr;
-    }
-
-public:
-    DeviceTensor() = default;
-
-    // Uninitialised, unlike Tensor. Use zeros() for a zero-filled one.
-    explicit DeviceTensor(const Shape& s) : shape_(s)
-    {
-        if (bytes() > 0)
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&data_), bytes()));
-    }
-
-    ~DeviceTensor() { release(); }
-
-    DeviceTensor(const DeviceTensor&) = delete;
-    DeviceTensor& operator=(const DeviceTensor&) = delete;
-
-    DeviceTensor(DeviceTensor&& o) noexcept
-        : data_(std::exchange(o.data_, nullptr)), shape_(std::exchange(o.shape_, Shape{}))
-    {
-    }
-
-    DeviceTensor& operator=(DeviceTensor&& o) noexcept
-    {
-        if (this != &o) {
-            release();
-            data_ = std::exchange(o.data_, nullptr);
-            shape_ = std::exchange(o.shape_, Shape{});
-        }
-        return *this;
-    }
-
-    static DeviceTensor zeros(const Shape& s)
-    {
-        DeviceTensor d(s);
-        if (d.bytes() > 0)
-            CUDA_CHECK(cudaMemset(d.data_, 0, d.bytes()));
-        return d;
-    }
-
-    static DeviceTensor from_host(const Tensor<T>& host)
-    {
-        DeviceTensor d(host.shape());
-        d.copy_from_host(host);
-        return d;
-    }
-
-    void copy_from_host(const Tensor<T>& host)
-    {
-        if (!(host.shape() == shape_))
-            throw std::invalid_argument("DeviceTensor::copy_from_host: shapes " + host.shape().str() +
-                                        " and " + shape_.str() + " do not match");
-        if (bytes() > 0)
-            CUDA_CHECK(cudaMemcpy(data_, host.raw(), bytes(), cudaMemcpyHostToDevice));
-    }
-
-    Tensor<T> to_host() const
-    {
-        Tensor<T> h(shape_);
-        if (bytes() > 0)
-            CUDA_CHECK(cudaMemcpy(h.raw(), data_, bytes(), cudaMemcpyDeviceToHost));
-        return h;
-    }
-
-    DeviceTensor clone() const
-    {
-        DeviceTensor d(shape_);
-        if (bytes() > 0)
-            CUDA_CHECK(cudaMemcpy(d.data_, data_, bytes(), cudaMemcpyDeviceToDevice));
-        return d;
-    }
-
-    const Shape& shape() const { return shape_; }
-    size_t ndim() const { return shape_.ndim; }
-    size_t dim(size_t i) const { return shape_[i]; }
-    size_t size() const { return shape_.size(); }
-
-    T* data() { return data_; }
-    const T* data() const { return data_; }
-
-    TensorView<T> view() { return {data_, shape_}; }
-    TensorView<const T> view() const { return {data_, shape_}; }
-
-    TensorView<T> view(const Shape& s)
-    {
-        if (s.size() != size())
-            throw std::invalid_argument("DeviceTensor::view: cannot view " + shape_.str() + " as " + s.str());
-        return {data_, s};
-    }
-};
-
-#endif // __GPU_ACCELERATION_CUDA
 
 #endif // TENSOR_HPP
