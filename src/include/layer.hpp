@@ -74,13 +74,45 @@ private:
 };
 
 
+// 2D max pooling, non-overlapping P x P windows (stride = P, floor division).
+//   x : {N, C, H,     W    }
+//   y : {N, C, H / P, W / P}
 struct MaxPoolLayer : Layer<fp32> {
+    explicit MaxPoolLayer(size_t pool_size = 2) : pool_size_(pool_size)
+    {
+        if (pool_size == 0)
+            throw std::invalid_argument("MaxPoolLayer: pool size must be non-zero");
+    }
 
+    size_t pool_size() const { return pool_size_; }
+
+    // y[n, c, i, j] = max_{0 <= u, v < P} x[n, c, i*P + u, j*P + v]
+    // Caches input_shape and winning positions in max_indices for backward().
+    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+
+    // Routes each dY[n, c, i, j] back to the winning element of its P x P window
+    // in dX (same shape as input_shape); all other entries in dX are 0.
+    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+
+private:
+    size_t pool_size_;
+    Shape input_shape;          // cached by forward() (needed when H or W isn't a multiple of P)
+    Tensor<size_t> max_indices; // {N, C, H/P, W/P}: winning index per pooling window
 };
 
 
+// Elementwise ReLU activation (works on any tensor shape).
+//   y[k] = max(0, x[k])
 struct ReLULayer : Layer<fp32> {
+    // y[k] = x[k] > 0 ? x[k] : 0
+    // Caches x for backward().
+    Tensor<fp32> forward(const Tensor<fp32>& x) override;
 
+    // dX[k] = input[k] > 0 ? dY[k] : 0
+    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+
+private:
+    Tensor<fp32> input; // cached by forward()
 };
 
 

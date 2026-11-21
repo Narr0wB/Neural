@@ -1,6 +1,8 @@
 
 #include "layer.hpp"
 
+#include <algorithm>
+
 Tensor<fp32> ConvLayer::forward(const Tensor<fp32>& x)
 {
     const Shape in_shape = x.shape();
@@ -26,7 +28,7 @@ Tensor<fp32> ConvLayer::forward(const Tensor<fp32>& x)
     const size_t outH = H - K + 1;
     const size_t outW = W - K + 1;
 
-    Tensor<fp32> y({N, O, outH, outW});
+    Tensor<fp32> y(N, O, outH, outW);
 
     for (size_t n = 0; n < N; n++) {
         for (size_t out = 0; out < O; out++) {
@@ -82,4 +84,44 @@ Tensor<fp32> ConvLayer::backward(const Tensor<fp32>& dY)
             }
         }
     }
+
+    for (size_t out = 0; out < O; out++) {
+        fp32 acc = 0;
+        for (size_t k = 0; k < N; k++) {
+            for (size_t u = 0; u < outH; u++) {
+                for (size_t v = 0; v < outW; v++) {
+                    acc += dY(k, out, u, v);
+                }
+            }
+        }
+
+        bias_grad(out) += acc;
+    }
+
+    Tensor<fp32> dX(N, I, H, W);
+
+    for (size_t n = 0; n < N; n++) {
+        for (size_t in = 0; in < I; in++) {
+            for (size_t i = 0; i < H; i++) {
+                for (size_t j = 0; j < W; j++) {
+                    fp32 acc = 0;
+                    for (size_t out = 0; out < O; out++) {
+                        const size_t u_begin = i >= K ? i - K + 1 : 0;
+                        const size_t u_end   = std::min(i+1, outH);
+                        const size_t v_begin = j >= K ? j - K + 1 : 0;
+                        const size_t v_end   = std::min(j+1, outW);
+
+                        for (size_t u = u_begin; u < u_end; u++) {
+                            for (size_t v = v_begin; v < v_end; v++) {
+                                acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
+                            }
+                        }
+                    }
+                    dX(n, in, i, j) = acc;
+                }
+            }
+        }
+    }
+
+    return dX;
 }
