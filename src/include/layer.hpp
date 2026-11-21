@@ -116,8 +116,27 @@ private:
 };
 
 
+// Simple matmul + bias
+//  x :       {N, A}
+//  y :       {N, B}
+//  weights : {B, A}
+//  bias:     {B}
 struct DenseLayer : Layer<fp32> {
+    Tensor<fp32> weights;
+    Tensor<fp32> weights_grad;
+    Tensor<fp32> bias;
+    Tensor<fp32> bias_grad;
 
+    size_t input_shape() const { return weights.shape()[1]; }
+    size_t output_shape() const { return weights.shape()[0]; }
+
+    // y[n, i] = bias[i] + sum_{j} weighs[i, j] * x[j]
+    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+
+    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+
+private:
+    Tensor<fp32> input; // cached by forward()
 };
 
 #endif // LAYER_HPP

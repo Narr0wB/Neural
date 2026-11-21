@@ -289,16 +289,10 @@ template <Numeric T>
 Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 
 template <Numeric T>
-Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
+void __matmul(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
-    detail::require_2d(a, "matmul");
-    detail::require_2d(b, "matmul");
     const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
-    if (k != b.dim(0))
-        throw std::invalid_argument("matmul: inner dimensions of " + a.shape().str() + " and " +
-                                    b.shape().str() + " do not match");
 
-    Tensor<T> out(n, m);
     const T* pa = a.raw();
     const T* pb = b.raw();
     T* po = out.raw();
@@ -309,6 +303,20 @@ Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
             for (size_t j = 0; j < m; ++j)
                 po[i * m + j] += a_ip * pb[p * m + j];
         }
+}
+
+template <Numeric T>
+Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
+{
+    detail::require_2d(a, "matmul");
+    detail::require_2d(b, "matmul");
+    const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
+    if (k != b.dim(0))
+        throw std::invalid_argument("matmul: inner dimensions of " + a.shape().str() + " and " +
+                                    b.shape().str() + " do not match");
+
+    Tensor<T> out(n, m);
+    __matmul(a, b, out);
     return out;
 }
 
