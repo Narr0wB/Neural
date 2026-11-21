@@ -39,6 +39,7 @@ concept Numeric = std::is_arithmetic_v<T>;
 
 typedef float  fp32;
 typedef double fp64;
+typedef unsigned char u8;
 
 inline constexpr size_t MAX_DIMS = 4;
 
