@@ -132,6 +132,13 @@ public:
 
     static Tensor zeros(const Shape& s) { return Tensor(s); }
 
+    static Tensor ones(const Shape& s)
+    {
+        Tensor t(s);
+        t.fill(T{1});
+        return t;
+    }
+
     static Tensor randn(const Shape& s) requires std::floating_point<T>
     {
         Tensor t(s);
@@ -226,43 +233,78 @@ void require_2d(const Tensor<T>& a, const char* op)
 }
 
 template <Numeric T, typename F>
-Tensor<T> elementwise(const Tensor<T>& a, const Tensor<T>& b, const char* op, F f)
+void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, const char* op, F f)
 {
     require_same_shape(a, b, op);
-    Tensor<T> out(a.shape());
+    require_same_shape(a, out, op);
     const T* pa = a.raw();
     const T* pb = b.raw();
     T* po = out.raw();
     for (size_t i = 0; i < a.size(); ++i)
         po[i] = f(pa[i], pb[i]);
-    return out;
 }
 } // namespace detail
 
 template <Numeric T>
+void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
+{
+    detail::elementwise(a, b, out, "add_into", [](T x, T y) { return x + y; });
+}
+
+template <Numeric T>
 Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
 {
-    return detail::elementwise(a, b, "add", [](T x, T y) { return x + y; });
+    detail::require_same_shape(a, b, "add");
+    Tensor<T> out(a.shape());
+    add_into(a, b, out);
+    return out;
+}
+
+template <Numeric T>
+void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
+{
+    detail::elementwise(a, b, out, "sub_into", [](T x, T y) { return x - y; });
 }
 
 template <Numeric T>
 Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
 {
-    return detail::elementwise(a, b, "sub", [](T x, T y) { return x - y; });
+    detail::require_same_shape(a, b, "sub");
+    Tensor<T> out(a.shape());
+    sub_into(a, b, out);
+    return out;
+}
+
+template <Numeric T>
+void hadamard_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
+{
+    detail::elementwise(a, b, out, "hadamard_into", [](T x, T y) { return x * y; });
 }
 
 template <Numeric T>
 Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 {
-    return detail::elementwise(a, b, "hadamard", [](T x, T y) { return x * y; });
+    detail::require_same_shape(a, b, "hadamard");
+    Tensor<T> out(a.shape());
+    hadamard_into(a, b, out);
+    return out;
+}
+
+template <Numeric T>
+void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
+{
+    detail::require_same_shape(a, out, "scale_into");
+    const T* pa = a.raw();
+    T* po = out.raw();
+    for (size_t i = 0; i < a.size(); ++i)
+        po[i] = pa[i] * s;
 }
 
 template <Numeric T>
 Tensor<T> scale(const Tensor<T>& a, T s)
 {
     Tensor<T> out(a.shape());
-    for (size_t i = 0; i < a.size(); ++i)
-        out.raw()[i] = a.raw()[i] * s;
+    scale_into(a, s, out);
     return out;
 }
 
@@ -288,10 +330,20 @@ Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
 template <Numeric T>
 Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 
+// Results are accumulated (+=) into @out. @out must not alias @a or @b.
 template <Numeric T>
-void __matmul(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
+void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
+    detail::require_2d(a, "matmul_into");
+    detail::require_2d(b, "matmul_into");
+    detail::require_2d(out, "matmul_into");
     const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
+    if (k != b.dim(0))
+        throw std::invalid_argument("matmul_into: inner dimensions of " + a.shape().str() + " and " +
+                                    b.shape().str() + " do not match");
+    if (!(out.shape() == Shape{n, m}))
+        throw std::invalid_argument("matmul_into: expected output shape " + Shape{n, m}.str() +
+                                    ", got " + out.shape().str());
 
     const T* pa = a.raw();
     const T* pb = b.raw();
@@ -316,19 +368,33 @@ Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
                                     b.shape().str() + " do not match");
 
     Tensor<T> out(n, m);
-    __matmul(a, b, out);
+    matmul_into(a, b, out);
     return out;
+}
+
+// Writes a^T into @out. @out must not alias @a.
+template <Numeric T>
+void transpose_into(const Tensor<T>& a, Tensor<T>& out)
+{
+    detail::require_2d(a, "transpose_into");
+    const size_t r = a.dim(0), c = a.dim(1);
+    if (!(out.shape() == Shape{c, r}))
+        throw std::invalid_argument("transpose_into: expected output shape " + Shape{c, r}.str() +
+                                    ", got " + out.shape().str());
+
+    const T* pa = a.raw();
+    T* po = out.raw();
+    for (size_t i = 0; i < r; ++i)
+        for (size_t j = 0; j < c; ++j)
+            po[j * r + i] = pa[i * c + j];
 }
 
 template <Numeric T>
 Tensor<T> transpose(const Tensor<T>& a)
 {
     detail::require_2d(a, "transpose");
-    const size_t r = a.dim(0), c = a.dim(1);
-    Tensor<T> out(c, r);
-    for (size_t i = 0; i < r; ++i)
-        for (size_t j = 0; j < c; ++j)
-            out(j, i) = a(i, j);
+    Tensor<T> out(a.dim(1), a.dim(0));
+    transpose_into(a, out);
     return out;
 }
 

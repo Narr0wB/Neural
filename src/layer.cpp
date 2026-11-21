@@ -243,20 +243,19 @@ Tensor<fp32> ReLULayer::backward(const Tensor<fp32>& dY)
 Tensor<fp32> DenseLayer::forward(const Tensor<fp32>& x)
 {
     const Shape in_shape = x.shape();
-    const size_t N = in_shape[0];
     const size_t A = input_shape();
-    const size_t B = output_shape();
+    if (in_shape.ndim != 2 || in_shape[1] != A)
+        throw std::invalid_argument("DenseLayer::forward: expected 2D input {N, " + std::to_string(A) +
+                                    "}, got " + in_shape.str());
 
-    if (in_shape[1] != A)
-        throw std::invalid_argument("");
+    const size_t N = in_shape[0];
 
-    Tensor<fp32> y(N, B);
+    input = x;
 
+    auto y = matmul(x, weights);
     for (size_t n = 0; n < N; n++) {
-        auto currentX = x.slice(n);
-        auto currentY = y.slice(n);
-        __matmul(weights, currentX, currentY);
-        __add(bias, currentY, currentY);
+        auto y_n = y.slice(n);
+        add_into(y_n, bias, y_n);
     }
 
     return y;
@@ -264,5 +263,43 @@ Tensor<fp32> DenseLayer::forward(const Tensor<fp32>& x)
 
 Tensor<fp32> DenseLayer::backward(const Tensor<fp32>& dY)
 {
-    
+    const size_t N = input.shape()[0];
+    const size_t B = output_shape();
+
+    const Shape expected{N, B};
+    if (!(dY.shape() == expected))
+        throw std::invalid_argument("DenseLayer::backward: expected gradient shape " + expected.str() +
+                                    ", got " + dY.shape().str());
+
+    Tensor<fp32> dX(input.shape());
+
+    matmul_into(transpose(input), dY, weights_grad);
+    for (size_t n = 0; n < N; n++)
+        add_into(bias_grad, dY.slice(n), bias_grad);
+    matmul_into(dY, transpose(weights), dX);
+
+    return dX;
+}
+
+Tensor<fp32> FlattenLayer::forward(const Tensor<fp32>& x)
+{
+    const Shape in_shape = x.shape();
+    if (in_shape.ndim < 2 || in_shape[0] == 0)
+        throw std::invalid_argument("FlattenLayer::forward: expected at least 2D input with N > 0, got " +
+                                    in_shape.str());
+
+    input_shape = in_shape;
+    const size_t N = in_shape[0];
+    return x.reshape(Shape{N, x.size() / N});
+}
+
+Tensor<fp32> FlattenLayer::backward(const Tensor<fp32>& dY)
+{
+    const size_t N = input_shape[0];
+    const Shape expected{N, input_shape.size() / N};
+    if (!(dY.shape() == expected))
+        throw std::invalid_argument("FlattenLayer::backward: expected gradient shape " + expected.str() +
+                                    ", got " + dY.shape().str());
+
+    return dY.reshape(input_shape);
 }

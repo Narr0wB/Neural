@@ -119,7 +119,7 @@ private:
 // Simple matmul + bias
 //  x :       {N, A}
 //  y :       {N, B}
-//  weights : {B, A}
+//  weights : {A, B}
 //  bias:     {B}
 struct DenseLayer : Layer<fp32> {
     Tensor<fp32> weights;
@@ -127,16 +127,53 @@ struct DenseLayer : Layer<fp32> {
     Tensor<fp32> bias;
     Tensor<fp32> bias_grad;
 
-    size_t input_shape() const { return weights.shape()[1]; }
-    size_t output_shape() const { return weights.shape()[0]; }
+    DenseLayer(size_t A, size_t B)
+    {
+        if (A == 0 || B == 0)
+            throw std::invalid_argument("DenseLayer: input and output sizes must be non-zero");
 
-    // y[n, i] = bias[i] + sum_{j} weighs[i, j] * x[j]
+        const Shape ws{A, B};
+
+        // He initialisation: N(0, 2 / fan_in), fan_in = A.
+        const fp32 stddev = std::sqrt(2.0f / static_cast<fp32>(A));
+        weights = Tensor<fp32>::randn(ws);
+        weights.apply([stddev](fp32 v) { return v * stddev; });
+        weights_grad = Tensor<fp32>(ws);
+
+        bias      = Tensor<fp32>(B);
+        bias_grad = Tensor<fp32>(B);
+    }
+
+    size_t input_shape() const { return weights.shape()[0]; }
+    size_t output_shape() const { return weights.shape()[1]; }
+
+    // y[n, i] = bias[i] + sum_{j} weighs[j, i] * x[n, j]
     Tensor<fp32> forward(const Tensor<fp32>& x) override;
 
+    // dW[i, j] = sum_{n} dY[n, j] * x[n, i]
+    // dB[i]    = sum_{n} dY[n, i]
+    // dX[n, i] = sum_{j} dY[n, j] * weights[i, j]
     Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+
+    std::vector<Param<fp32>> params() override { return {{weights, weights_grad}, {bias, bias_grad}}; }
 
 private:
     Tensor<fp32> input; // cached by forward()
+};
+
+
+// Flattens all dimensions after the batch axis (zero-copy view).
+//   x : {N, d1, ...}
+//   y : {N, d1 * ...}
+struct FlattenLayer : Layer<fp32> {
+    // Reshapes x to {N, x.size() / N} and caches x.shape() for backward().
+    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+
+    // Reshapes dY back to the cached input_shape.
+    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+
+private:
+    Shape input_shape; // cached by forward()
 };
 
 #endif // LAYER_HPP
