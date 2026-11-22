@@ -9,7 +9,7 @@
 #include <limits>
 
 
-template <Numeric T, typename Target = Tensor<T>>
+template <std::floating_point T = fp32, typename Target = Tensor<T>>
 struct Loss {
     virtual T forward(const Tensor<T>& pred, const Target& target) = 0;
     virtual Tensor<T> backward() = 0;
@@ -17,7 +17,7 @@ struct Loss {
 };
 
 
-template <Numeric T, typename Target = Tensor<T>>
+template <std::floating_point T = fp32, typename Target = Tensor<T>>
 struct CrossEntropyLoss : Loss<T, Target> {
     explicit CrossEntropyLoss() = default;
 

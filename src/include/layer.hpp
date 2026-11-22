@@ -4,22 +4,25 @@
 
 #include "tensor.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <concepts>
 #include <stdexcept>
 #include <vector>
 
-template <Numeric T>
+template <std::floating_point T = fp32>
 struct Param {
     Tensor<T> value;
     Tensor<T> grad;
 };
 
-template <Numeric T>
+template <std::floating_point T = fp32>
 struct Layer {
     virtual Tensor<T> forward(const Tensor<T>& x) = 0;
     virtual Tensor<T> backward(const Tensor<T>& dY) = 0;
 
-    virtual std::vector<Param<T>> params() { return {}; }  // {value, grad} pairs for the optimizer
+    virtual void to(Device) {}
+    virtual std::vector<Param<T>> params() { return {}; }
     virtual ~Layer() = default;
 };
 
@@ -29,11 +32,12 @@ struct Layer {
 //   y       : {N, C_out, H - K + 1, W - K + 1}
 //   filters : {C_out, C_in, K, K}
 //   bias    : {C_out}  (one scalar per output channel)
-struct ConvLayer : Layer<fp32> {
-    Tensor<fp32> filters;
-    Tensor<fp32> filters_grad;
-    Tensor<fp32> bias;
-    Tensor<fp32> bias_grad;
+template <std::floating_point T = fp32>
+struct ConvLayer : Layer<T> {
+    Tensor<T> filters;
+    Tensor<T> filters_grad;
+    Tensor<T> bias;
+    Tensor<T> bias_grad;
 
     ConvLayer(size_t in_channels, size_t out_channels, size_t kernel_size)
     {
@@ -42,14 +46,13 @@ struct ConvLayer : Layer<fp32> {
 
         const Shape fs{out_channels, in_channels, kernel_size, kernel_size};
 
-        // He initialisation: N(0, 2 / fan_in), fan_in = C_in * K * K.
-        const fp32 stddev = std::sqrt(2.0f / static_cast<fp32>(in_channels * kernel_size * kernel_size));
-        filters = Tensor<fp32>::randn(fs);
-        filters.apply([stddev](fp32 v) { return v * stddev; });
-        filters_grad = Tensor<fp32>(fs);
+        const T stddev = std::sqrt(T{2} / static_cast<T>(in_channels * kernel_size * kernel_size));
+        filters = Tensor<T>::randn(fs);
+        filters.apply([stddev](T v) { return v * stddev; });
+        filters_grad = Tensor<T>(fs);
 
-        bias      = Tensor<fp32>(Shape{out_channels});
-        bias_grad = Tensor<fp32>(Shape{out_channels});
+        bias      = Tensor<T>(Shape{out_channels});
+        bias_grad = Tensor<T>(Shape{out_channels});
     }
 
     size_t in_channels() const { return filters.dim(1); }
@@ -57,27 +60,154 @@ struct ConvLayer : Layer<fp32> {
     size_t kernel_size() const { return filters.dim(2); }
 
     // y[n, o, i, j] = bias[o] + sum_{c, u, v} x[n, c, i+u, j+v] * filters[o, c, u, v]
-    // Caches x for backward().
-    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+    Tensor<T> forward(const Tensor<T>& x) override
+    {
+        const Shape in_shape = x.shape();
+        if (in_shape.ndim != 4)
+            throw std::invalid_argument("ConvLayer::forward: expected 4D input {N, C_in, H, W}, got " + in_shape.str());
 
-    // Given dY = dL/dy, accumulates (+=):
+        const size_t K = kernel_size();
+        const size_t I = in_channels();
+        const size_t N = in_shape[0];
+        const size_t O = out_channels();
+        const size_t H = in_shape[2];
+        const size_t W = in_shape[3];
+
+        if (in_shape[1] != I)
+            throw std::invalid_argument("ConvLayer::forward: expected " + std::to_string(I) +
+                                        " input channels, got " + std::to_string(in_shape[1]));
+        if (H < K || W < K)
+            throw std::invalid_argument("ConvLayer::forward: input spatial size " + std::to_string(H) + "x" +
+                                        std::to_string(W) + " is smaller than kernel size " + std::to_string(K));
+
+        input = x;
+
+        const size_t outH = H - K + 1;
+        const size_t outW = W - K + 1;
+
+        Tensor<T> y(N, O, outH, outW);
+
+        #pragma omp parallel for collapse(2)
+        for (size_t n = 0; n < N; n++) {
+            for (size_t out = 0; out < O; out++) {
+                for (size_t i = 0; i < outH; i++) {
+                    for (size_t j = 0; j < outW; j++) {
+                        T acc = bias(out);
+                        for (size_t c = 0; c < I; c++) {
+                            for (size_t u = 0; u < K; u++) {
+                                for (size_t v = 0; v < K; v++) {
+                                    acc += filters(out, c, u, v) * x(n, c, i + u, j + v);
+                                }
+                            }
+                        }
+                        y(n, out, i, j) = acc;
+                    }
+                }
+            }
+        }
+
+        return y;
+    }
+
     //   filters_grad[o, c, u, v] += sum_{n, i, j} dY[n, o, i, j] * x[n, c, i+u, j+v]
     //   bias_grad[o]             += sum_{n, i, j} dY[n, o, i, j]
-    // and returns dX = dL/dx, same shape as x:
     //   dX[n, c, p, q] = sum_{o, u, v} dY[n, o, p-u, q-v] * filters[o, c, u, v]   (out-of-range dY terms are 0)
-    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+    Tensor<T> backward(const Tensor<T>& dY) override
+    {
+        const size_t N = input.shape()[0];
+        const size_t H = input.shape()[2];
+        const size_t W = input.shape()[3];
+        const size_t K = kernel_size();
+        const size_t O = out_channels();
+        const size_t I = in_channels();
 
-    std::vector<Param<fp32>> params() override { return {{filters, filters_grad}, {bias, bias_grad}}; }
+        const size_t outH = H - K + 1;
+        const size_t outW = W - K + 1;
+
+        if (!(dY.shape() == Shape{N, O, outH, outW}))
+            throw std::invalid_argument("ConvLayer::backward: input gradient shape must match output shape");
+
+        #pragma omp parallel for collapse(2)
+        for (size_t out = 0; out < O; out++) {
+            for (size_t in = 0; in < I; in++) {
+                for (size_t i = 0; i < K; i++) {
+                    for (size_t j = 0; j < K; j++) {
+                        T acc = T{0};
+                        for (size_t k = 0; k < N; k++) {
+                            for (size_t u = 0; u < outH; u++) {
+                                for (size_t v = 0; v < outW; v++) {
+                                    acc += dY(k, out, u, v) * input(k, in, i + u, j + v);
+                                }
+                            }
+                        }
+                        filters_grad(out, in, i, j) += acc;
+                    }
+                }
+            }
+        }
+
+        for (size_t out = 0; out < O; out++) {
+            T acc = T{0};
+            for (size_t k = 0; k < N; k++) {
+                for (size_t u = 0; u < outH; u++) {
+                    for (size_t v = 0; v < outW; v++) {
+                        acc += dY(k, out, u, v);
+                    }
+                }
+            }
+
+            bias_grad(out) += acc;
+        }
+
+        Tensor<T> dX(N, I, H, W);
+
+        #pragma omp parallel for collapse(4)
+        for (size_t n = 0; n < N; n++) {
+            for (size_t in = 0; in < I; in++) {
+                for (size_t i = 0; i < H; i++) {
+                    for (size_t j = 0; j < W; j++) {
+                        T acc = T{0};
+                        for (size_t out = 0; out < O; out++) {
+                            const size_t u_begin = i >= K ? i - K + 1 : 0;
+                            const size_t u_end   = std::min(i + 1, outH);
+                            const size_t v_begin = j >= K ? j - K + 1 : 0;
+                            const size_t v_end   = std::min(j + 1, outW);
+
+                            for (size_t u = u_begin; u < u_end; u++) {
+                                for (size_t v = v_begin; v < v_end; v++) {
+                                    acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
+                                }
+                            }
+                        }
+                        dX(n, in, i, j) = acc;
+                    }
+                }
+            }
+        }
+
+        return dX;
+    }
+
+    void to(Device dev) override
+    {
+        filters      = filters.to(dev);
+        filters_grad = filters_grad.to(dev);
+        bias         = bias.to(dev);
+        bias_grad    = bias_grad.to(dev);
+    }
+
+    std::vector<Param<T>> params() override { return {{filters, filters_grad}, {bias, bias_grad}}; }
 
 private:
-    Tensor<fp32> input; // cached by forward()
+    Tensor<T> input;
 };
 
 
 // 2D max pooling, non-overlapping P x P windows (stride = P, floor division).
 //   x : {N, C, H,     W    }
 //   y : {N, C, H / P, W / P}
-struct MaxPoolLayer : Layer<fp32> {
+template <std::floating_point T = fp32>
+struct MaxPoolLayer : Layer<T> {
     explicit MaxPoolLayer(size_t pool_size = 2) : pool_size_(pool_size)
     {
         if (pool_size == 0)
@@ -87,32 +217,134 @@ struct MaxPoolLayer : Layer<fp32> {
     size_t pool_size() const { return pool_size_; }
 
     // y[n, c, i, j] = max_{0 <= u, v < P} x[n, c, i*P + u, j*P + v]
-    // Caches input_shape and winning positions in max_indices for backward().
-    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+    Tensor<T> forward(const Tensor<T>& x) override
+    {
+        const Shape in_shape = x.shape();
+        const size_t P = pool_size_;
+        const size_t N = in_shape[0];
+        const size_t C = in_shape[1];
+        const size_t H = in_shape[2];
+        const size_t W = in_shape[3];
+
+        if (in_shape.ndim != 4 || H < P || W < P)
+            throw std::invalid_argument("MaxPoolLayer::forward: expected 4D input with H, W >= P");
+
+        input_shape = in_shape;
+        const size_t outH = H / P;
+        const size_t outW = W / P;
+
+        Tensor<T> y(N, C, outH, outW);
+        max_indices = Tensor<size_t>(N, C, outH, outW);
+
+        for (size_t n = 0; n < N; n++) {
+            for (size_t c = 0; c < C; c++) {
+                for (size_t i = 0; i < outH; i++) {
+                    const size_t base_row_off = input_shape.offset(n, c, i * P, 0);
+
+                    for (size_t j = 0; j < outW; j++) {
+                        size_t max_idx = base_row_off + j * P;
+                        T max          = x.raw()[max_idx];
+
+                        for (size_t u = 0; u < P; u++) {
+                            const size_t row_off = base_row_off + u * W;
+                            const T* row         = &x.raw()[row_off];
+
+                            for (size_t v = 0; v < P; v++) {
+                                const size_t col_off = j * P + v;
+                                T val = row[col_off];
+
+                                if (val > max) {
+                                    max = val;
+                                    max_idx = row_off + col_off;
+                                }
+                            }
+                        }
+
+                        max_indices(n, c, i, j) = max_idx;
+                        y(n, c, i, j) = max;
+                    }
+                }
+            }
+        }
+
+        return y;
+    }
 
     // Routes each dY[n, c, i, j] back to the winning element of its P x P window
-    // in dX (same shape as input_shape); all other entries in dX are 0.
-    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+    Tensor<T> backward(const Tensor<T>& dY) override
+    {
+        const size_t P = pool_size_;
+        const size_t N = input_shape[0];
+        const size_t C = input_shape[1];
+        const size_t H = input_shape[2];
+        const size_t W = input_shape[3];
+
+        const size_t outH = H / P;
+        const size_t outW = W / P;
+
+        if (!(dY.shape() == Shape{N, C, outH, outW}))
+            throw std::invalid_argument("MaxPoolLayer::backward: gradient tensor shape does not match cached output shape");
+
+        Tensor<T> dX(N, C, H, W);
+
+        auto indices = max_indices.flatten();
+        auto flat_dY = dY.flatten();
+        auto flat_dX = dX.flatten();
+        for (size_t i = 0; i < indices.size(); i++) {
+            flat_dX(indices(i)) = flat_dY(i);
+        }
+
+        return dX;
+    }
 
 private:
     size_t pool_size_;
-    Shape input_shape;          // cached by forward() (needed when H or W isn't a multiple of P)
-    Tensor<size_t> max_indices; // {N, C, H/P, W/P}: winning index per pooling window
+    Shape input_shape;
+    Tensor<size_t> max_indices; // {N, C, H/P, W/P}: passing index per pooling window
 };
 
 
 // Elementwise ReLU activation (works on any tensor shape).
 //   y[k] = max(0, x[k])
-struct ReLULayer : Layer<fp32> {
+template <std::floating_point T = fp32>
+struct ReLULayer : Layer<T> {
     // y[k] = x[k] > 0 ? x[k] : 0
-    // Caches x for backward().
-    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+    Tensor<T> forward(const Tensor<T>& x) override
+    {
+        input = x;
+
+        Tensor<T> y(x.shape());
+
+        auto flat_x = x.flatten();
+        auto flat_y = y.flatten();
+        for (size_t i = 0; i < x.size(); i++) {
+            flat_y(i) = std::max(T{0}, flat_x(i));
+        }
+
+        return y;
+    }
 
     // dX[k] = input[k] > 0 ? dY[k] : 0
-    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+    Tensor<T> backward(const Tensor<T>& dY) override
+    {
+        if (!(dY.shape() == input.shape()))
+            throw std::invalid_argument("ReLULayer::backward: gradient shape " + dY.shape().str() +
+                                        " does not match cached input shape " + input.shape().str());
+
+        Tensor<T> dX(input.shape());
+
+        auto flat_dX    = dX.flatten();
+        auto flat_dY    = dY.flatten();
+        auto flat_input = input.flatten();
+        for (size_t i = 0; i < flat_dX.size(); i++) {
+            flat_dX(i) = flat_input(i) > T{0} ? flat_dY(i) : T{0};
+        }
+
+        return dX;
+    }
 
 private:
-    Tensor<fp32> input; // cached by forward()
+    Tensor<T> input;
 };
 
 
@@ -121,11 +353,12 @@ private:
 //  y :       {N, B}
 //  weights : {A, B}
 //  bias:     {B}
-struct DenseLayer : Layer<fp32> {
-    Tensor<fp32> weights;
-    Tensor<fp32> weights_grad;
-    Tensor<fp32> bias;
-    Tensor<fp32> bias_grad;
+template <std::floating_point T = fp32>
+struct DenseLayer : Layer<T> {
+    Tensor<T> weights;
+    Tensor<T> weights_grad;
+    Tensor<T> bias;
+    Tensor<T> bias_grad;
 
     DenseLayer(size_t A, size_t B)
     {
@@ -135,42 +368,105 @@ struct DenseLayer : Layer<fp32> {
         const Shape ws{A, B};
 
         // He initialisation: N(0, 2 / fan_in), fan_in = A.
-        const fp32 stddev = std::sqrt(2.0f / static_cast<fp32>(A));
-        weights = Tensor<fp32>::randn(ws);
-        weights.apply([stddev](fp32 v) { return v * stddev; });
-        weights_grad = Tensor<fp32>(ws);
+        const T stddev = std::sqrt(T{2} / static_cast<T>(A));
+        weights = Tensor<T>::randn(ws);
+        weights.apply([stddev](T v) { return v * stddev; });
+        weights_grad = Tensor<T>(ws);
 
-        bias      = Tensor<fp32>(B);
-        bias_grad = Tensor<fp32>(B);
+        bias      = Tensor<T>(B);
+        bias_grad = Tensor<T>(B);
     }
 
     size_t input_shape() const { return weights.shape()[0]; }
     size_t output_shape() const { return weights.shape()[1]; }
 
-    // y[n, i] = bias[i] + sum_{j} weighs[j, i] * x[n, j]
-    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+    // y[n, i] = bias[i] + sum_{j} weights[j, i] * x[n, j]
+    Tensor<T> forward(const Tensor<T>& x) override
+    {
+        const Shape in_shape = x.shape();
+        const size_t A = input_shape();
+        if (in_shape.ndim != 2 || in_shape[1] != A)
+            throw std::invalid_argument("DenseLayer::forward: expected 2D input {N, " + std::to_string(A) +
+                                        "}, got " + in_shape.str());
+
+        const size_t N = in_shape[0];
+
+        input = x;
+
+        auto y = matmul(x, weights);
+        for (size_t n = 0; n < N; n++) {
+            auto y_n = y.slice(n);
+            add_into(y_n, bias, y_n);
+        }
+
+        return y;
+    }
 
     // dW[i, j] = sum_{n} dY[n, j] * x[n, i]
     // dB[i]    = sum_{n} dY[n, i]
     // dX[n, i] = sum_{j} dY[n, j] * weights[i, j]
-    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+    Tensor<T> backward(const Tensor<T>& dY) override
+    {
+        const size_t N = input.shape()[0];
+        const size_t B = output_shape();
 
-    std::vector<Param<fp32>> params() override { return {{weights, weights_grad}, {bias, bias_grad}}; }
+        const Shape expected{N, B};
+        if (!(dY.shape() == expected))
+            throw std::invalid_argument("DenseLayer::backward: expected gradient shape " + expected.str() +
+                                        ", got " + dY.shape().str());
+
+        Tensor<T> dX(input.shape());
+
+        matmul_into(transpose(input), dY, weights_grad);
+        for (size_t n = 0; n < N; n++)
+            add_into(bias_grad, dY.slice(n), bias_grad);
+        matmul_into(dY, transpose(weights), dX);
+
+        return dX;
+    }
+
+    void to(Device dev) override
+    {
+        weights      = weights.to(dev);
+        weights_grad = weights_grad.to(dev);
+        bias         = bias.to(dev);
+        bias_grad    = bias_grad.to(dev);
+    }
+
+    std::vector<Param<T>> params() override { return {{weights, weights_grad}, {bias, bias_grad}}; }
 
 private:
-    Tensor<fp32> input; // cached by forward()
+    Tensor<T> input;
 };
 
 
 // Flattens all dimensions after the batch axis (zero-copy view).
 //   x : {N, d1, ...}
 //   y : {N, d1 * ...}
-struct FlattenLayer : Layer<fp32> {
-    // Reshapes x to {N, x.size() / N} and caches x.shape() for backward().
-    Tensor<fp32> forward(const Tensor<fp32>& x) override;
+template <std::floating_point T = fp32>
+struct FlattenLayer : Layer<T> {
+    Tensor<T> forward(const Tensor<T>& x) override
+    {
+        const Shape in_shape = x.shape();
+        if (in_shape.ndim < 2 || in_shape[0] == 0)
+            throw std::invalid_argument("FlattenLayer::forward: expected at least 2D input with N > 0, got " +
+                                        in_shape.str());
 
-    // Reshapes dY back to the cached input_shape.
-    Tensor<fp32> backward(const Tensor<fp32>& dY) override;
+        input_shape = in_shape;
+        const size_t N = in_shape[0];
+        return x.reshape(Shape{N, x.size() / N});
+    }
+
+    Tensor<T> backward(const Tensor<T>& dY) override
+    {
+        const size_t N = input_shape[0];
+        const Shape expected{N, input_shape.size() / N};
+        if (!(dY.shape() == expected))
+            throw std::invalid_argument("FlattenLayer::backward: expected gradient shape " + expected.str() +
+                                        ", got " + dY.shape().str());
+
+        return dY.reshape(input_shape);
+    }
 
 private:
     Shape input_shape; // cached by forward()

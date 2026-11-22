@@ -3,7 +3,9 @@
 #define TENSOR_HPP
 
 #include <cassert>
-#include <concepts>
+#include <cstring>
+#include <concepts> 
+#include <algorithm>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
@@ -173,9 +175,9 @@ public:
     explicit Tensor(D... dims) : Tensor(Shape{static_cast<size_t>(dims)...})
     {}
 
-    static Tensor zeros(const Shape& s, Device dev = Device::CPU) { return Tensor(dev, s); }
+    [[nodiscard]] static Tensor zeros(const Shape& s, Device dev = Device::CPU) { return Tensor(dev, s); }
 
-    static Tensor ones(const Shape& s, Device dev = Device::CPU)
+    [[nodiscard]] static Tensor ones(const Shape& s, Device dev = Device::CPU)
     {
         Tensor t(s);
         t.fill(T{1});
@@ -188,7 +190,7 @@ public:
 #endif
     }
 
-    static Tensor randn(const Shape& s, Device dev = Device::CPU) requires std::floating_point<T>
+    [[nodiscard]] static Tensor randn(const Shape& s, Device dev = Device::CPU) requires std::floating_point<T>
     {
         Tensor t(s);
         std::normal_distribution<T> dist(T{0}, T{1});
@@ -228,13 +230,13 @@ public:
         return data[shape_.offset(idx...)];
     }
 
-    TensorView<T> view() { return {data.get(), shape_}; }
-    TensorView<const T> view() const { return {data.get(), shape_}; }
+    [[nodiscard]] TensorView<T> view() { return {data.get(), shape_}; }
+    [[nodiscard]] TensorView<const T> view() const { return {data.get(), shape_}; }
 
-#ifdef __GPU_ACCELERATION_CUDA
-    Tensor<T> to(Device dev) const
+    [[nodiscard]] Tensor<T> to(Device dev) const
     {
         if (dev == device_) return *this;
+#ifdef __GPU_ACCELERATION_CUDA
 
         Tensor<T> out(dev, shape_);
 
@@ -246,12 +248,14 @@ public:
         }
 
         return out;
+#else
+        throw std::runtime_error("Tensor::to: CUDA support not compiled in");
+#endif
     }
-#endif // __GPU_ACCELERATION_CUDA
 
     // Index i along the first dimension, dropping it: for {N, C, H, W},
     // slice(n).slice(c) is the H x W plane.
-    Tensor slice(size_t i) const
+    [[nodiscard]] Tensor slice(size_t i) const
     {
         if (shape_.ndim < 2)
             throw std::invalid_argument("Tensor::slice: needs at least 2 dimensions, got " + shape_.str());
@@ -268,16 +272,16 @@ public:
         return Tensor(std::shared_ptr<T[]>(data, data.get() + i * sub.size()), sub, device_);
     }
 
-    Tensor reshape(const Shape& s) const
+    [[nodiscard]] Tensor reshape(const Shape& s) const
     {
         if (s.size() != size())
             throw std::invalid_argument("Tensor::reshape: cannot reshape " + shape_.str() + " to " + s.str());
         return Tensor(data, s, device_);
     }
 
-    Tensor flatten() const { return reshape({size()}); }
+    [[nodiscard]] Tensor flatten() const { return reshape({size()}); }
 
-    Tensor clone() const
+    [[nodiscard]] Tensor clone() const
     {
         if (device_ == Device::CUDA) {
 #ifdef __GPU_ACCELERATION_CUDA
@@ -291,17 +295,30 @@ public:
 #endif
         }
         Tensor t(shape_);
-        for (size_t i = 0; i < size(); ++i)
-            t.data[i] = data[i];
+        if (bytes() > 0)
+            std::memcpy(t.raw(), data.get(), bytes());
         return t;
     }
 
     void fill(T value)
     {
-        if (device_ != Device::CPU)
+        if (device_ == Device::CPU) {
+            std::fill_n(data.get(), shape_.size(), value);
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            if (bytes() == 0) return;
+
+            if constexpr (sizeof(T) == 1)
+                CUDA_CHECK(cudaMemset(data.get(), static_cast<unsigned char>(value), bytes()));
+            else if (value == T{0}) 
+                CUDA_CHECK(cudaMemset(data.get(), static_cast<unsigned char>(0), bytes()));
+            else
+                cuda_ops::fill<T>(data.get(), value, shape_.size());
+#else
             throw std::runtime_error("Tensor::fill: only supported on CPU tensors");
-        for (size_t i = 0; i < size(); ++i)
-            data[i] = value;
+#endif
+        }
     }
 
     template <typename F>
@@ -378,7 +395,7 @@ void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 }
 
 template <Numeric T>
-Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
+[[nodiscard]] Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
 {
     detail::require_same_device(a, b, "add");
     detail::require_cpu(a, "add");
@@ -395,7 +412,7 @@ void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 }
 
 template <Numeric T>
-Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
+[[nodiscard]] Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
 {
     detail::require_same_device(a, b, "sub");
     detail::require_cpu(a, "sub");
@@ -412,7 +429,7 @@ void hadamard_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 }
 
 template <Numeric T>
-Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
+[[nodiscard]] Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 {
     detail::require_same_device(a, b, "hadamard");
     detail::require_cpu(a, "hadamard");
@@ -435,7 +452,7 @@ void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 }
 
 template <Numeric T>
-Tensor<T> scale(const Tensor<T>& a, T s)
+[[nodiscard]] Tensor<T> scale(const Tensor<T>& a, T s)
 {
     detail::require_cpu(a, "scale");
     Tensor<T> out(a.shape());
@@ -444,7 +461,7 @@ Tensor<T> scale(const Tensor<T>& a, T s)
 }
 
 template <Numeric T>
-T sum(const Tensor<T>& a)
+[[nodiscard]] T sum(const Tensor<T>& a)
 {
     detail::require_cpu(a, "sum");
     T total{};
@@ -454,7 +471,7 @@ T sum(const Tensor<T>& a)
 }
 
 template <Numeric T>
-size_t argmax(const Tensor<T>& a)
+[[nodiscard]] size_t argmax(const Tensor<T>& a)
 {
     detail::require_cpu(a, "argmax");
     if (a.size() == 0)
@@ -469,16 +486,16 @@ size_t argmax(const Tensor<T>& a)
 
 // No tensor * tensor operator on purpose: use matmul() or hadamard().
 template <Numeric T>
-Tensor<T> operator+(const Tensor<T>& a, const Tensor<T>& b) { return add(a, b); }
+[[nodiscard]] Tensor<T> operator+(const Tensor<T>& a, const Tensor<T>& b) { return add(a, b); }
 
 template <Numeric T>
-Tensor<T> operator-(const Tensor<T>& a, const Tensor<T>& b) { return sub(a, b); }
+[[nodiscard]] Tensor<T> operator-(const Tensor<T>& a, const Tensor<T>& b) { return sub(a, b); }
 
 template <Numeric T>
-Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
+[[nodiscard]] Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
 
 template <Numeric T>
-Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
+[[nodiscard]] Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 
 // Results are accumulated (+=) into @out. @out must not alias @a or @b.
 template <Numeric T>
@@ -502,16 +519,18 @@ void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
     const T* pb = b.raw();
     T* po = out.raw();
     // i-k-j order keeps the inner loop on contiguous memory in b and out.
-    for (size_t i = 0; i < n; ++i)
+#pragma omp parallel for if(n * k * m >= 200000)
+    for (size_t i = 0; i < n; ++i) {
         for (size_t p = 0; p < k; ++p) {
             const T a_ip = pa[i * k + p];
             for (size_t j = 0; j < m; ++j)
                 po[i * m + j] += a_ip * pb[p * m + j];
         }
+    }
 }
 
 template <Numeric T>
-Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
+[[nodiscard]] Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
 {
     detail::require_same_device(a, b, "matmul");
     detail::require_cpu(a, "matmul");
@@ -547,7 +566,7 @@ void transpose_into(const Tensor<T>& a, Tensor<T>& out)
 }
 
 template <Numeric T>
-Tensor<T> transpose(const Tensor<T>& a)
+[[nodiscard]] Tensor<T> transpose(const Tensor<T>& a)
 {
     detail::require_cpu(a, "transpose");
     detail::require_2d(a, "transpose");

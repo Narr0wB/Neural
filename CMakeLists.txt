@@ -9,12 +9,16 @@ option(USE_CUDA "Enable CUDA GPU acceleration" OFF)
 
 # Core library (reusable by both the main executable and future tests)
 add_library(neural_core
-    src/layer.cpp
     src/dataset.cpp
     src/datasets/mnist.cpp
 )
 target_include_directories(neural_core PUBLIC src/include)
-target_compile_options(neural_core PRIVATE -Wall -Wextra)
+target_compile_options(neural_core PUBLIC -Wall -Wextra -O3)
+
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(neural_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 if(USE_CUDA)
     enable_language(CUDA)

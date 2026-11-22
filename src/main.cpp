@@ -17,22 +17,22 @@ int main(int argc, char** argv) {
     auto mnist_eval  = load_mnist_csv("datasets/mnist_eval.csv");
 
     Model<fp32> cnn = Model<fp32>();
-    cnn.add(std::make_unique<ConvLayer>(1, 8, 3));
-    cnn.add(std::make_unique<ReLULayer>());
-    cnn.add(std::make_unique<MaxPoolLayer>(2));
-    cnn.add(std::make_unique<ConvLayer>(8, 16, 3));
-    cnn.add(std::make_unique<ReLULayer>());
-    cnn.add(std::make_unique<MaxPoolLayer>(2));
-    cnn.add(std::make_unique<FlattenLayer>());
-    cnn.add(std::make_unique<DenseLayer>(400, 64));
-    cnn.add(std::make_unique<ReLULayer>());
-    cnn.add(std::make_unique<DenseLayer>(64, 10));
+    cnn.add(std::make_unique<ConvLayer<fp32>>(1, 8, 3));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<MaxPoolLayer<fp32>>(2));
+    cnn.add(std::make_unique<ConvLayer<fp32>>(8, 16, 3));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<MaxPoolLayer<fp32>>(2));
+    cnn.add(std::make_unique<FlattenLayer<fp32>>());
+    cnn.add(std::make_unique<DenseLayer<fp32>>(400, 64));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<DenseLayer<fp32>>(64, 10));
     
     auto optimizer = SGDOptimizer<fp32>(cnn.params(), 0.05f);
     auto loss      = CrossEntropyLoss<fp32>();
 
     const size_t batch_size = 32;
-    const size_t epochs     = 3;
+    const size_t epochs     = 5;
 
     for (size_t e = 0; e < epochs; e++) {
         auto indices = shuffled_indices(mnist_train.size());

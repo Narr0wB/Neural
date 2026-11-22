@@ -7,12 +7,16 @@
 
 #include <vector>
 
-template <Numeric T>
+template <std::floating_point T = fp32>
 struct Optimizer {
-    explicit Optimizer(std::vector<Param<T>> params) : params_(std::move(params)) {};
+    explicit Optimizer(std::vector<Param<T>> params) : params_(std::move(params)) {}
 
     virtual void optimize() = 0;
-    virtual void zero_grads() = 0;
+    virtual void zero_grads()
+    {
+        for (auto& param : params_)
+            param.grad.fill(T{0});
+    }
 
     virtual ~Optimizer() = default;
 
@@ -20,7 +24,7 @@ protected:
     std::vector<Param<T>> params_;
 };
 
-template <Numeric T>
+template <std::floating_point T = fp32>
 struct SGDOptimizer : Optimizer<T> {
     SGDOptimizer(std::vector<Param<T>> params, T learning_rate) : Optimizer<T>(params), lr(learning_rate) {}
 
@@ -32,13 +36,6 @@ struct SGDOptimizer : Optimizer<T> {
             for (size_t i = 0; i < flat_value.size(); i++) {
                 flat_value(i) -= lr * flat_grad(i);
             }
-        }
-    }
-
-    void zero_grads() override
-    {
-        for (auto& param : params_) {
-            param.grad.fill(T{0});
         }
     }
 
