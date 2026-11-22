@@ -1,5 +1,5 @@
 build/
 !build/Makefile
 
-datasets/
-!datasets/mnist_test.zip
+/datasets/
+!/datasets/mnist_test.zip

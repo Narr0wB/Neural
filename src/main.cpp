@@ -1,27 +1,70 @@
+
 #include <iostream>
+#include <format>
+#include <numeric>
+
 #include "neural.hpp"
+#include "tensor.hpp"
+#include "layer.hpp"
+#include "loss.hpp"
+#include "optimizer.hpp"
+
+#include "dataset.hpp"
+#include "datasets/mnist.hpp"
 
 int main(int argc, char** argv) {
+    auto mnist_train = load_mnist_csv("datasets/mnist_train.csv");
+    auto mnist_eval  = load_mnist_csv("datasets/mnist_eval.csv");
 
-    std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000); // MAX IMGS -> 60,000
-    std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000); // MAX IMGS -> 10,000
-
-    // TRAIN ----------------------------------------------------------------------------------
+    Model<fp32> cnn = Model<fp32>();
+    cnn.add(std::make_unique<ConvLayer>(1, 8, 3));
+    cnn.add(std::make_unique<ReLULayer>());
+    cnn.add(std::make_unique<MaxPoolLayer>(2));
+    cnn.add(std::make_unique<ConvLayer>(8, 16, 3));
+    cnn.add(std::make_unique<ReLULayer>());
+    cnn.add(std::make_unique<MaxPoolLayer>(2));
+    cnn.add(std::make_unique<FlattenLayer>());
+    cnn.add(std::make_unique<DenseLayer>(400, 64));
+    cnn.add(std::make_unique<ReLULayer>());
+    cnn.add(std::make_unique<DenseLayer>(64, 10));
     
-    SimpleNeuralNetwork snn(train, 1, 0.28, true, 100); // Train constructor
+    auto optimizer = SGDOptimizer<fp32>(cnn.params(), 0.05f);
+    auto loss      = CrossEntropyLoss<fp32>();
 
-    // To save a trained model
-    // snn.save("testmodel.nn");
+    const size_t batch_size = 32;
+    const size_t epochs     = 3;
 
-    // LOAD -----------------------------------------------------------------------------------
+    for (size_t e = 0; e < epochs; e++) {
+        auto indices = shuffled_indices(mnist_train.size());
 
-    // SimpleNeuralNetwork e("../pretrained/model20e60k0p28.nn"); // Load constructor
-    
-    // To run a single image and get the output of the network (Loaded model) where the index of the list is taken from the user (argv arguments)
-    snn.run_visual(test[0]);
+        for (size_t i = 0; i < mnist_train.size(); i += batch_size) {
+            auto batch = gather_batch(mnist_train, indices, i, batch_size);
 
-    // Test the accuracy of the model
-    printf("##### Model accuracy: %.2f%c #####\n\n", snn.evaluate(test, true) * 100, '%');
+            auto out = cnn.forward(batch.inputs);
+            auto l = loss.forward(out, batch.targets);
+            cnn.backward(loss.backward());
+
+            optimizer.optimize();
+            optimizer.zero_grads();
+
+            std::cout << std::format("batch {} | CELoss: {}", i, l) << std::endl;
+        }
+    }
+
+    std::vector<size_t> eval_idx(mnist_eval.size());
+    std::iota(eval_idx.begin(), eval_idx.end(), 0);
+
+    size_t correct = 0;
+
+    for (size_t i = 0; i < mnist_eval.size(); i += batch_size) {
+        auto batch = gather_batch(mnist_eval, eval_idx, i, batch_size);
+        auto out   = cnn.forward(batch.inputs);
+        for (size_t n = 0; n < batch.size(); n++) {
+            if (argmax(out.slice(n)) == argmax(batch.targets.slice(n)))
+                correct++;
+        }
+    }
+    std::cout << std::format("acc {:.2f}%", (fp32(correct) / fp32(mnist_eval.size())) * 100.0f) << std::endl;
 
     return 0;
 }

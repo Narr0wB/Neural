@@ -453,6 +453,20 @@ T sum(const Tensor<T>& a)
     return total;
 }
 
+template <Numeric T>
+size_t argmax(const Tensor<T>& a)
+{
+    detail::require_cpu(a, "argmax");
+    if (a.size() == 0)
+        throw std::invalid_argument("argmax: tensor is empty");
+    const T* p = a.raw();
+    size_t best = 0;
+    for (size_t i = 1; i < a.size(); ++i)
+        if (p[i] > p[best])
+            best = i;
+    return best;
+}
+
 // No tensor * tensor operator on purpose: use matmul() or hadamard().
 template <Numeric T>
 Tensor<T> operator+(const Tensor<T>& a, const Tensor<T>& b) { return add(a, b); }

@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.20)
+project(Neural LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(USE_CUDA "Enable CUDA GPU acceleration" OFF)
+
+# Core library (reusable by both the main executable and future tests)
+add_library(neural_core
+    src/layer.cpp
+    src/dataset.cpp
+    src/datasets/mnist.cpp
+)
+target_include_directories(neural_core PUBLIC src/include)
+target_compile_options(neural_core PRIVATE -Wall -Wextra)
+
+if(USE_CUDA)
+    enable_language(CUDA)
+    target_compile_definitions(neural_core PUBLIC __GPU_ACCELERATION_CUDA)
+endif()
+
+# Main executable
+add_executable(neural
+    src/main.cpp
+)
+target_link_libraries(neural PRIVATE neural_core)
