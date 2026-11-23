@@ -48,26 +48,23 @@ private:
 public:
     Tensor() = default;
 
-    // Zero-filled.
     explicit Tensor(Device dev, const Shape& s) : shape_(s), device_(dev)
     {
-        if (device_ == Device::CUDA) {
+        if (device_ == Device::CPU) {
+            data = std::make_shared_for_overwrite<T[]>(s.size());
+        }
+        else {
 #ifdef __GPU_ACCELERATION_CUDA
             T* raw_ptr = nullptr;
             const size_t bytes = size() * sizeof(T);
             if (bytes > 0) {
                 CUDA_CHECK(cudaMalloc(&raw_ptr, bytes));
                 data = std::shared_ptr<T[]>(raw_ptr, [](T* p) { if (p) cudaFree(p); });
-                CUDA_CHECK(cudaMemset(raw_ptr, 0, bytes));
             }
-
-            return;
 #else
             throw std::runtime_error("Tensor: CUDA support not compiled in");
 #endif
         }
-
-        data = std::make_shared<T[]>(s.size());
     }
 
     template <std::integral... D>
@@ -75,41 +72,49 @@ public:
     explicit Tensor(Device dev, D... dims) : Tensor(dev, Shape{static_cast<size_t>(dims)...})
     {}
 
-    explicit Tensor(const Shape& s) : data(std::make_shared<T[]>(s.size())), shape_(s) {}
+    explicit Tensor(const Shape& s) : Tensor(Device::CPU, s) {}
 
     template <std::integral... D>
         requires(sizeof...(D) >= 1 && sizeof...(D) <= MAX_DIMS)
     explicit Tensor(D... dims) : Tensor(Shape{static_cast<size_t>(dims)...})
     {}
 
-    [[nodiscard]] static Tensor zeros(const Shape& s, Device dev = Device::CPU) { return Tensor(dev, s); }
-
-    [[nodiscard]] static Tensor ones(const Shape& s, Device dev = Device::CPU)
+    [[nodiscard]] static Tensor zeros(Device dev, const Shape& s)
     {
-        Tensor t(s);
-        t.fill(T{1});
-        if (dev == Device::CPU)
-            return t;
-#ifdef __GPU_ACCELERATION_CUDA
-        return t.to(dev);
-#else
-        throw std::runtime_error("Tensor::ones: CUDA support not compiled in");
-#endif
+        Tensor out(dev, s);
+        out.fill(T{0});
+        return out;
     }
 
-    [[nodiscard]] static Tensor randn(const Shape& s, Device dev = Device::CPU) requires std::floating_point<T>
+    [[nodiscard]] static Tensor zeros(const Shape& s)
+    {
+        return zeros(Device::CPU, s);
+    }
+
+    [[nodiscard]] static Tensor ones(Device dev, const Shape& s)
+    {
+        Tensor out(dev, s);
+        out.fill(T{1});
+        return out;
+    }
+
+    [[nodiscard]] static Tensor ones(const Shape& s)
+    {
+        return ones(Device::CPU, s);
+    }
+
+    [[nodiscard]] static Tensor randn(Device dev, const Shape& s) requires std::floating_point<T>
     {
         Tensor t(s);
         std::normal_distribution<T> dist(T{0}, T{1});
         for (size_t i = 0; i < t.size(); ++i)
             t.data[i] = dist(detail::rng());
-        if (dev == Device::CPU)
-            return t;
-#ifdef __GPU_ACCELERATION_CUDA
         return t.to(dev);
-#else
-        throw std::runtime_error("Tensor::randn: CUDA support not compiled in");
-#endif
+    }
+
+    [[nodiscard]] static Tensor randn(const Shape& s) requires std::floating_point<T>
+    {
+        return randn(Device::CPU, s);
     }
 
     const Shape& shape() const { return shape_; }
@@ -493,7 +498,7 @@ Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
     Shape out_shape = a.shape();
     out_shape.dims[ndim - 1] = b.dim(ndim - 1);
 
-    Tensor<T> out(a.device(), out_shape);
+    Tensor<T> out = Tensor<T>::zeros(a.device(), out_shape);
     matmul_into(a, b, out);
     return out;
 }

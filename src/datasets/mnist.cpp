@@ -55,7 +55,7 @@ Dataset load_mnist_csv(const std::string& path, size_t max_samples)
 
     Dataset ds;
     ds.inputs  = Tensor<fp32>(N, MNIST_CHANNELS, MNIST_HEIGHT, MNIST_WIDTH);
-    ds.targets = Tensor<fp32>(N, MNIST_CLASSES);
+    ds.targets = Tensor<fp32>::zeros({N, MNIST_CLASSES});
 
     fp32* in_data  = ds.inputs.raw();
     fp32* tgt_data = ds.targets.raw();

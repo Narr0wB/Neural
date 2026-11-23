@@ -49,10 +49,10 @@ struct ConvLayer : Layer<T> {
         const T stddev = std::sqrt(T{2} / static_cast<T>(in_channels * kernel_size * kernel_size));
         filters = Tensor<T>::randn(fs);
         filters.apply([stddev](T v) { return v * stddev; });
-        filters_grad = Tensor<T>(fs);
+        filters_grad = Tensor<T>::zeros(fs);
 
-        bias      = Tensor<T>(Shape{out_channels});
-        bias_grad = Tensor<T>(Shape{out_channels});
+        bias      = Tensor<T>::zeros(Shape{out_channels});
+        bias_grad = Tensor<T>::zeros(Shape{out_channels});
     }
 
     size_t in_channels() const { return filters.dim(1); }
@@ -321,7 +321,7 @@ struct MaxPoolLayer : Layer<T> {
         if (!(dY.shape() == Shape{N, C, outH, outW}))
             throw std::invalid_argument("MaxPoolLayer::backward: gradient tensor shape does not match cached output shape");
 
-        Tensor<T> dX(dY.device(), N, C, H, W);
+        Tensor<T> dX = Tensor<T>::zeros(dY.device(), {N, C, H, W});
 
         if (dY.device() == Device::CPU) {
             auto indices = max_indices.flatten();
@@ -435,10 +435,10 @@ struct DenseLayer : Layer<T> {
         const T stddev = std::sqrt(T{2} / static_cast<T>(A));
         weights = Tensor<T>::randn(ws);
         weights.apply([stddev](T v) { return v * stddev; });
-        weights_grad = Tensor<T>(ws);
+        weights_grad = Tensor<T>::zeros(ws);
 
-        bias      = Tensor<T>(B);
-        bias_grad = Tensor<T>(B);
+        bias      = Tensor<T>::zeros(Shape{B});
+        bias_grad = Tensor<T>::zeros(Shape{B});
     }
 
     size_t input_shape() const { return weights.shape()[0]; }
@@ -478,7 +478,7 @@ struct DenseLayer : Layer<T> {
             throw std::invalid_argument("DenseLayer::backward: expected gradient shape " + expected.str() +
                                         ", got " + dY.shape().str());
 
-        Tensor<T> dX(input.device(), input.shape());
+        Tensor<T> dX = Tensor<T>::zeros(input.device(), input.shape());
 
         matmul_into(transpose(input), dY, weights_grad);
         for (size_t n = 0; n < N; n++)
