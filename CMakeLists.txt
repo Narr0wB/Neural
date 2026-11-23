@@ -13,7 +13,9 @@ add_library(neural_core
     src/datasets/mnist.cpp
 )
 target_include_directories(neural_core PUBLIC src/include)
-target_compile_options(neural_core PUBLIC -Wall -Wextra -O3)
+target_compile_options(neural_core PUBLIC
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+)
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
@@ -22,6 +24,9 @@ endif()
 
 if(USE_CUDA)
     enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    target_sources(neural_core PRIVATE src/cuda/cuda_ops.cu)
     target_compile_definitions(neural_core PUBLIC __GPU_ACCELERATION_CUDA)
 endif()
 

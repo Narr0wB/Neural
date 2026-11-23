@@ -62,6 +62,8 @@ struct ConvLayer : Layer<T> {
     // y[n, o, i, j] = bias[o] + sum_{c, u, v} x[n, c, i+u, j+v] * filters[o, c, u, v]
     Tensor<T> forward(const Tensor<T>& x) override
     {
+        detail::require_same_device("ConvLayer::forward", filters, filters_grad, bias, bias_grad, x);
+
         const Shape in_shape = x.shape();
         if (in_shape.ndim != 4)
             throw std::invalid_argument("ConvLayer::forward: expected 4D input {N, C_in, H, W}, got " + in_shape.str());
@@ -85,26 +87,36 @@ struct ConvLayer : Layer<T> {
         const size_t outH = H - K + 1;
         const size_t outW = W - K + 1;
 
-        Tensor<T> y(N, O, outH, outW);
+        Tensor<T> y(x.device(), N, O, outH, outW);
 
-        #pragma omp parallel for collapse(2)
-        for (size_t n = 0; n < N; n++) {
-            for (size_t out = 0; out < O; out++) {
-                for (size_t i = 0; i < outH; i++) {
-                    for (size_t j = 0; j < outW; j++) {
-                        T acc = bias(out);
-                        for (size_t c = 0; c < I; c++) {
-                            for (size_t u = 0; u < K; u++) {
-                                for (size_t v = 0; v < K; v++) {
-                                    acc += filters(out, c, u, v) * x(n, c, i + u, j + v);
+        if (x.device() == Device::CPU) {
+            #pragma omp parallel for collapse(2)
+            for (size_t n = 0; n < N; n++) {
+                for (size_t out = 0; out < O; out++) {
+                    for (size_t i = 0; i < outH; i++) {
+                        for (size_t j = 0; j < outW; j++) {
+                            T acc = bias(out);
+                            for (size_t c = 0; c < I; c++) {
+                                for (size_t u = 0; u < K; u++) {
+                                    for (size_t v = 0; v < K; v++) {
+                                        acc += filters(out, c, u, v) * x(n, c, i + u, j + v);
+                                    }
                                 }
                             }
+                            y(n, out, i, j) = acc;
                         }
-                        y(n, out, i, j) = acc;
                     }
                 }
             }
         }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::conv2d_forward(x.view(), filters.cview(), bias.cview(), y.view());
+#else
+            detail::require_cpu("ConvLayer::forward", x);
+#endif
+        }
+
 
         return y;
     }
@@ -114,6 +126,8 @@ struct ConvLayer : Layer<T> {
     //   dX[n, c, p, q] = sum_{o, u, v} dY[n, o, p-u, q-v] * filters[o, c, u, v]   (out-of-range dY terms are 0)
     Tensor<T> backward(const Tensor<T>& dY) override
     {
+        detail::require_same_device("ConvLayer::backward", dY, input, filters, filters_grad, bias, bias_grad);
+
         const size_t N = input.shape()[0];
         const size_t H = input.shape()[2];
         const size_t W = input.shape()[3];
@@ -127,62 +141,72 @@ struct ConvLayer : Layer<T> {
         if (!(dY.shape() == Shape{N, O, outH, outW}))
             throw std::invalid_argument("ConvLayer::backward: input gradient shape must match output shape");
 
-        #pragma omp parallel for collapse(2)
-        for (size_t out = 0; out < O; out++) {
-            for (size_t in = 0; in < I; in++) {
-                for (size_t i = 0; i < K; i++) {
-                    for (size_t j = 0; j < K; j++) {
-                        T acc = T{0};
-                        for (size_t k = 0; k < N; k++) {
-                            for (size_t u = 0; u < outH; u++) {
-                                for (size_t v = 0; v < outW; v++) {
-                                    acc += dY(k, out, u, v) * input(k, in, i + u, j + v);
+        Tensor<T> dX(dY.device(), N, I, H, W);
+
+        if (dY.device() == Device::CPU) {
+            #pragma omp parallel for collapse(2)
+            for (size_t out = 0; out < O; out++) {
+                for (size_t in = 0; in < I; in++) {
+                    for (size_t i = 0; i < K; i++) {
+                        for (size_t j = 0; j < K; j++) {
+                            T acc = T{0};
+                            for (size_t k = 0; k < N; k++) {
+                                for (size_t u = 0; u < outH; u++) {
+                                    for (size_t v = 0; v < outW; v++) {
+                                        acc += dY(k, out, u, v) * input(k, in, i + u, j + v);
+                                    }
                                 }
                             }
+                            filters_grad(out, in, i, j) += acc;
                         }
-                        filters_grad(out, in, i, j) += acc;
+                    }
+                }
+            }
+
+            for (size_t out = 0; out < O; out++) {
+                T acc = T{0};
+                for (size_t k = 0; k < N; k++) {
+                    for (size_t u = 0; u < outH; u++) {
+                        for (size_t v = 0; v < outW; v++) {
+                            acc += dY(k, out, u, v);
+                        }
+                    }
+                }
+
+                bias_grad(out) += acc;
+            }
+
+            #pragma omp parallel for collapse(4)
+            for (size_t n = 0; n < N; n++) {
+                for (size_t in = 0; in < I; in++) {
+                    for (size_t i = 0; i < H; i++) {
+                        for (size_t j = 0; j < W; j++) {
+                            T acc = T{0};
+                            for (size_t out = 0; out < O; out++) {
+                                const size_t u_begin = i >= K ? i - K + 1 : 0;
+                                const size_t u_end   = std::min(i + 1, outH);
+                                const size_t v_begin = j >= K ? j - K + 1 : 0;
+                                const size_t v_end   = std::min(j + 1, outW);
+
+                                for (size_t u = u_begin; u < u_end; u++) {
+                                    for (size_t v = v_begin; v < v_end; v++) {
+                                        acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
+                                    }
+                                }
+                            }
+                            dX(n, in, i, j) = acc;
+                        }
                     }
                 }
             }
         }
-
-        for (size_t out = 0; out < O; out++) {
-            T acc = T{0};
-            for (size_t k = 0; k < N; k++) {
-                for (size_t u = 0; u < outH; u++) {
-                    for (size_t v = 0; v < outW; v++) {
-                        acc += dY(k, out, u, v);
-                    }
-                }
-            }
-
-            bias_grad(out) += acc;
-        }
-
-        Tensor<T> dX(N, I, H, W);
-
-        #pragma omp parallel for collapse(4)
-        for (size_t n = 0; n < N; n++) {
-            for (size_t in = 0; in < I; in++) {
-                for (size_t i = 0; i < H; i++) {
-                    for (size_t j = 0; j < W; j++) {
-                        T acc = T{0};
-                        for (size_t out = 0; out < O; out++) {
-                            const size_t u_begin = i >= K ? i - K + 1 : 0;
-                            const size_t u_end   = std::min(i + 1, outH);
-                            const size_t v_begin = j >= K ? j - K + 1 : 0;
-                            const size_t v_end   = std::min(j + 1, outW);
-
-                            for (size_t u = u_begin; u < u_end; u++) {
-                                for (size_t v = v_begin; v < v_end; v++) {
-                                    acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
-                                }
-                            }
-                        }
-                        dX(n, in, i, j) = acc;
-                    }
-                }
-            }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::conv2d_backward(input.cview(), filters.cview(), dY.view(), 
+                filters_grad.view(), bias_grad.view(), dX.view());
+#else
+            detail::require_cpu("ConvLayer::backward", dY);
+#endif
         }
 
         return dX;
@@ -233,39 +257,49 @@ struct MaxPoolLayer : Layer<T> {
         const size_t outH = H / P;
         const size_t outW = W / P;
 
-        Tensor<T> y(N, C, outH, outW);
-        max_indices = Tensor<size_t>(N, C, outH, outW);
+        Tensor<T> y(x.device(), N, C, outH, outW);
+        max_indices = Tensor<size_t>(x.device(), N, C, outH, outW);
 
-        for (size_t n = 0; n < N; n++) {
-            for (size_t c = 0; c < C; c++) {
-                for (size_t i = 0; i < outH; i++) {
-                    const size_t base_row_off = input_shape.offset(n, c, i * P, 0);
+        if (x.device() == Device::CPU) {
+            for (size_t n = 0; n < N; n++) {
+                for (size_t c = 0; c < C; c++) {
+                    for (size_t i = 0; i < outH; i++) {
+                        const size_t base_row_off = input_shape.offset(n, c, i * P, 0);
 
-                    for (size_t j = 0; j < outW; j++) {
-                        size_t max_idx = base_row_off + j * P;
-                        T max          = x.raw()[max_idx];
+                        for (size_t j = 0; j < outW; j++) {
+                            size_t max_idx = base_row_off + j * P;
+                            T max          = x.raw()[max_idx];
 
-                        for (size_t u = 0; u < P; u++) {
-                            const size_t row_off = base_row_off + u * W;
-                            const T* row         = &x.raw()[row_off];
+                            for (size_t u = 0; u < P; u++) {
+                                const size_t row_off = base_row_off + u * W;
+                                const T* row         = &x.raw()[row_off];
 
-                            for (size_t v = 0; v < P; v++) {
-                                const size_t col_off = j * P + v;
-                                T val = row[col_off];
+                                for (size_t v = 0; v < P; v++) {
+                                    const size_t col_off = j * P + v;
+                                    T val = row[col_off];
 
-                                if (val > max) {
-                                    max = val;
-                                    max_idx = row_off + col_off;
+                                    if (val > max) {
+                                        max = val;
+                                        max_idx = row_off + col_off;
+                                    }
                                 }
                             }
-                        }
 
-                        max_indices(n, c, i, j) = max_idx;
-                        y(n, c, i, j) = max;
+                            max_indices(n, c, i, j) = max_idx;
+                            y(n, c, i, j) = max;
+                        }
                     }
                 }
             }
         }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::maxpool2d_forward(x.view(), y.view(), max_indices.view(), P);
+#else
+            detail::require_cpu("MaxPoolLayer::forward", x);
+#endif
+        }
+
 
         return y;
     }
@@ -273,6 +307,8 @@ struct MaxPoolLayer : Layer<T> {
     // Routes each dY[n, c, i, j] back to the winning element of its P x P window
     Tensor<T> backward(const Tensor<T>& dY) override
     {
+        detail::require_same_device("MaxPoolLayer::backward", dY, max_indices);
+
         const size_t P = pool_size_;
         const size_t N = input_shape[0];
         const size_t C = input_shape[1];
@@ -285,13 +321,21 @@ struct MaxPoolLayer : Layer<T> {
         if (!(dY.shape() == Shape{N, C, outH, outW}))
             throw std::invalid_argument("MaxPoolLayer::backward: gradient tensor shape does not match cached output shape");
 
-        Tensor<T> dX(N, C, H, W);
+        Tensor<T> dX(dY.device(), N, C, H, W);
 
-        auto indices = max_indices.flatten();
-        auto flat_dY = dY.flatten();
-        auto flat_dX = dX.flatten();
-        for (size_t i = 0; i < indices.size(); i++) {
-            flat_dX(indices(i)) = flat_dY(i);
+        if (dY.device() == Device::CPU) {
+            auto indices = max_indices.flatten();
+            auto flat_dY = dY.flatten();
+            auto flat_dX = dX.flatten();
+            for (size_t i = 0; i < indices.size(); i++)
+                flat_dX(indices(i)) = flat_dY(i);
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::maxpool2d_backward(dY.view(), max_indices.cview(), dX.view());
+#else
+            detail::require_cpu("MaxPoolLayer::backward", dY);
+#endif
         }
 
         return dX;
@@ -313,12 +357,21 @@ struct ReLULayer : Layer<T> {
     {
         input = x;
 
-        Tensor<T> y(x.shape());
+        Tensor<T> y(x.device(), x.shape());
 
-        auto flat_x = x.flatten();
-        auto flat_y = y.flatten();
-        for (size_t i = 0; i < x.size(); i++) {
-            flat_y(i) = std::max(T{0}, flat_x(i));
+        if (x.device() == Device::CPU) {
+            auto flat_x = x.flatten();
+            auto flat_y = y.flatten();
+            for (size_t i = 0; i < x.size(); i++) {
+                flat_y(i) = std::max(T{0}, flat_x(i));
+            }
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::relu_forward(x.view(), y.view());
+#else
+            detail::require_cpu("ReLULayer::forward", x);
+#endif
         }
 
         return y;
@@ -327,17 +380,28 @@ struct ReLULayer : Layer<T> {
     // dX[k] = input[k] > 0 ? dY[k] : 0
     Tensor<T> backward(const Tensor<T>& dY) override
     {
+        detail::require_same_device("ReLULayer::backward", dY, input);
+
         if (!(dY.shape() == input.shape()))
             throw std::invalid_argument("ReLULayer::backward: gradient shape " + dY.shape().str() +
                                         " does not match cached input shape " + input.shape().str());
 
-        Tensor<T> dX(input.shape());
+        Tensor<T> dX(input.device(), input.shape());
 
-        auto flat_dX    = dX.flatten();
-        auto flat_dY    = dY.flatten();
-        auto flat_input = input.flatten();
-        for (size_t i = 0; i < flat_dX.size(); i++) {
-            flat_dX(i) = flat_input(i) > T{0} ? flat_dY(i) : T{0};
+        if (dY.device() == Device::CPU) {
+            auto flat_dX    = dX.flatten();
+            auto flat_dY    = dY.flatten();
+            auto flat_input = input.flatten();
+            for (size_t i = 0; i < flat_dX.size(); i++) {
+                flat_dX(i) = flat_input(i) > T{0} ? flat_dY(i) : T{0};
+            }
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::relu_backward(input.cview(), dY.view(), dX.view());
+#else
+            detail::require_cpu("ReLULayer::backward", dY);
+#endif
         }
 
         return dX;
@@ -389,9 +453,8 @@ struct DenseLayer : Layer<T> {
             throw std::invalid_argument("DenseLayer::forward: expected 2D input {N, " + std::to_string(A) +
                                         "}, got " + in_shape.str());
 
-        const size_t N = in_shape[0];
-
         input = x;
+        const size_t N = in_shape[0];
 
         auto y = matmul(x, weights);
         for (size_t n = 0; n < N; n++) {
@@ -415,7 +478,7 @@ struct DenseLayer : Layer<T> {
             throw std::invalid_argument("DenseLayer::backward: expected gradient shape " + expected.str() +
                                         ", got " + dY.shape().str());
 
-        Tensor<T> dX(input.shape());
+        Tensor<T> dX(input.device(), input.shape());
 
         matmul_into(transpose(input), dY, weights_grad);
         for (size_t n = 0; n < N; n++)

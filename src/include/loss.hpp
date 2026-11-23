@@ -23,6 +23,8 @@ struct CrossEntropyLoss : Loss<T, Target> {
 
     T forward(const Tensor<T>& pred, const Target& target) override
     {
+        detail::require_same_device("CrossEntropyLoss::forward", pred, target);
+
         if (!(pred.shape() == target.shape()) || pred.shape().ndim != 2 || pred.dim(0) == 0 || pred.dim(1) == 0)
             throw std::invalid_argument("CrossEntropyLoss::forward: prediction must have the same shape as the target");
 
@@ -32,29 +34,37 @@ struct CrossEntropyLoss : Loss<T, Target> {
         const size_t N = in_shape[0];
         const size_t L = in_shape[1];
 
+        probs_ = Tensor<T>(pred.device(), N, L);
+
         T out = 0;
+        if (pred.device() == Device::CPU) {
+            for (size_t n = 0; n < N; n++) {
+                auto current_pred   = pred.slice(n);
+                auto current_target = target.slice(n);
 
-        probs_ = Tensor<T>(N, L);
+                T max = std::numeric_limits<T>::lowest();
+                for (size_t i = 0; i < L; i++)
+                    max = std::max(max, current_pred(i));
 
-        for (size_t n = 0; n < N; n++) {
-            auto current_pred   = pred.slice(n);
-            auto current_target = target.slice(n);
+                T log_arg = 0;
+                for (size_t i = 0; i < L; i++) {
+                    T e = std::exp(current_pred(i) - max);
+                    probs_(n, i) = e;
+                    out -= current_target(i) * (current_pred(i) - max);
+                    log_arg += e;
+                }
+                for (size_t i = 0; i < L; i++)
+                    probs_(n, i) /= log_arg;
 
-            T max = std::numeric_limits<T>::lowest();
-            for (size_t i = 0; i < L; i++)
-                max = std::max(max, current_pred(i));
-
-            T log_arg = 0;
-            for (size_t i = 0; i < L; i++) {
-                T e = std::exp(current_pred(i) - max);
-                probs_(n, i) = e;
-                out -= current_target(i) * (current_pred(i) - max);
-                log_arg += e;
+                out += std::log(log_arg);
             }
-            for (size_t i = 0; i < L; i++)
-                probs_(n, i) /= log_arg;
-
-            out += std::log(log_arg);
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            return cuda_ops::cross_entropy_forward(pred.view(), target.view(), probs_.view());
+#else
+            detail::require_cpu("CrossEntropyLoss::forward", pred);
+#endif
         }
 
         return out / static_cast<T>(N);
@@ -66,12 +76,19 @@ struct CrossEntropyLoss : Loss<T, Target> {
         const size_t L = probs_.dim(1);
         const T inv_N = T{1} / static_cast<T>(N);
 
-        Tensor<T> out(probs_.shape());
+        Tensor<T> out(probs_.device(), probs_.shape());
 
-        for (size_t n = 0; n < N; n++) {
-            for (size_t i = 0; i < L; i++) {
-                out(n, i) = inv_N * (probs_(n, i) - target_(n, i));
-            }
+        if (probs_.device() == Device::CPU) {
+            for (size_t n = 0; n < N; n++)
+                for (size_t i = 0; i < L; i++)
+                    out(n, i) = inv_N * (probs_(n, i) - target_(n, i));
+        }
+        else {
+#ifdef __GPU_ACCELERATION_CUDA
+            cuda_ops::cross_entropy_backward(probs_.cview(), target_.cview(), out.view());
+#else
+            detail::require_cpu("CrossEntropyLoss::backward", probs_);
+#endif
         }
 
         return out;

@@ -1,24 +1,6 @@
 {
     "configurations": [
         {
-            "name": "linux",
-            "includePath": [
-                "${workspaceFolder}/**",
-                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.2/include"
-            ],
-            "defines": [
-                "_DEBUG",
-                "UNICODE",
-                "_UNICODE"
-            ],
-            "windowsSdkVersion": "10.0.22621.0",
-            "compilerPath": "C:/msys64/mingw64/bin/g++.exe",
-            "cStandard": "c17",
-            "cppStandard": "c++20",
-            "intelliSenseMode": "windows-gcc-x64",
-            "configurationProvider": "ms-vscode.makefile-tools"
-        },
-        {
             "name": "unix",
             "includePath": [
                 "${workspaceFolder}/**"

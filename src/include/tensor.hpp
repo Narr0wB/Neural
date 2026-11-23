@@ -2,12 +2,13 @@
 #ifndef TENSOR_HPP
 #define TENSOR_HPP
 
-#include <cassert>
-#include <cstring>
-#include <concepts> 
+#include "tensor_view.hpp"
+
 #include <algorithm>
+#include <cassert>
+#include <concepts>
 #include <cstddef>
-#include <initializer_list>
+#include <cstring>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -16,102 +17,8 @@
 #include <utility>
 
 #ifdef __GPU_ACCELERATION_CUDA
-#include <cuda_runtime.h>
-
-// Kernel launches return nothing: call CUDA_CHECK(cudaGetLastError()) after one.
-#define CUDA_CHECK(call)                                                        \
-    do {                                                                        \
-        cudaError_t err_ = (call);                                              \
-        if (err_ != cudaSuccess)                                                \
-            throw std::runtime_error(std::string("CUDA error: ") +              \
-                                     cudaGetErrorString(err_) + " at " +        \
-                                     __FILE__ + ":" + std::to_string(__LINE__)); \
-    } while (0)
+#include "cuda/cuda_ops.hpp"
 #endif
-
-// Only defined as __host__ __device__ when compiled as CUDA by nvcc.
-#ifdef __CUDACC__
-#define NN_HOST_DEVICE __host__ __device__
-#else
-#define NN_HOST_DEVICE
-#endif
-
-template <typename T>
-concept Numeric = std::is_arithmetic_v<T>;
-
-typedef float  fp32;
-typedef double fp64;
-typedef unsigned char u8;
-
-inline constexpr size_t MAX_DIMS = 4;
-
-// Plain array instead of std::array so it can be used inside CUDA kernels.
-struct Shape {
-    size_t dims[MAX_DIMS] = {};
-    size_t ndim = 0;
-
-    Shape() = default;
-
-    Shape(std::initializer_list<size_t> d)
-    {
-        if (d.size() > MAX_DIMS)
-            throw std::invalid_argument("Shape: at most " + std::to_string(MAX_DIMS) + " dimensions");
-        for (size_t v : d)
-            dims[ndim++] = v;
-    }
-
-    NN_HOST_DEVICE size_t operator[](size_t i) const { return dims[i]; }
-
-    NN_HOST_DEVICE size_t size() const
-    {
-        if (ndim == 0)
-            return 0;
-        size_t n = 1;
-        for (size_t i = 0; i < ndim; ++i)
-            n *= dims[i];
-        return n;
-    }
-
-    // Row-major: ((i0 * d1 + i1) * d2 + i2) * d3 + i3.
-    template <std::integral... I>
-    NN_HOST_DEVICE size_t offset(I... idx) const
-    {
-        assert(sizeof...(I) == ndim);
-        size_t o = 0, k = 0;
-        ((o = o * dims[k++] + static_cast<size_t>(idx)), ...);
-        return o;
-    }
-
-    NN_HOST_DEVICE bool operator==(const Shape& o) const
-    {
-        if (ndim != o.ndim)
-            return false;
-        for (size_t i = 0; i < ndim; ++i)
-            if (dims[i] != o.dims[i])
-                return false;
-        return true;
-    }
-
-    std::string str() const
-    {
-        std::string s = "[";
-        for (size_t i = 0; i < ndim; ++i)
-            s += (i ? ", " : "") + std::to_string(dims[i]);
-        return s + "]";
-    }
-};
-
-// Must not outlive the tensor it came from.
-template <Numeric T>
-struct TensorView {
-    T* data = nullptr;
-    Shape shape;
-
-    NN_HOST_DEVICE size_t size() const { return shape.size(); }
-
-    template <std::integral... I>
-    NN_HOST_DEVICE T& operator()(I... idx) const { return data[shape.offset(idx...)]; }
-};
 
 namespace detail {
 inline std::mt19937& rng()
@@ -232,6 +139,7 @@ public:
 
     [[nodiscard]] TensorView<T> view() { return {data.get(), shape_}; }
     [[nodiscard]] TensorView<const T> view() const { return {data.get(), shape_}; }
+    [[nodiscard]] TensorView<const T> cview() const { return {data.get(), shape_}; }
 
     [[nodiscard]] Tensor<T> to(Device dev) const
     {
@@ -314,7 +222,7 @@ public:
             else if (value == T{0}) 
                 CUDA_CHECK(cudaMemset(data.get(), static_cast<unsigned char>(0), bytes()));
             else
-                cuda_ops::fill<T>(data.get(), value, shape_.size());
+                cuda_ops::fill<T>(view(), value);
 #else
             throw std::runtime_error("Tensor::fill: only supported on CPU tensors");
 #endif
@@ -342,44 +250,46 @@ inline const char* device_name(Device d)
     return "unknown";
 }
 
-template <Numeric T>
-void require_same_device(const Tensor<T>& a, const Tensor<T>& b, const char* op)
+template <Numeric T, Numeric... Ts>
+void require_same_device(const char* op, const Tensor<T>& first, const Tensor<Ts>&... rest)
 {
-    if (a.device() != b.device())
-        throw std::invalid_argument(std::string(op) + ": tensors are on different devices (" +
-                                    device_name(a.device()) + " vs " + device_name(b.device()) + ")");
+    auto check = [&](const auto& t) {
+        if (t.device() != first.device())
+            throw std::invalid_argument(std::string(op) + ": tensors are on different devices (" +
+                                        device_name(first.device()) + " vs " + device_name(t.device()) + ")");
+    };
+    (check(rest), ...);
 }
 
 template <Numeric T>
-void require_cpu(const Tensor<T>& a, const char* op)
+void require_cpu(const char* op, const Tensor<T>& a)
 {
     if (a.device() != Device::CPU)
         throw std::runtime_error(std::string(op) + ": CUDA backend not implemented yet");
 }
 
-template <Numeric T>
-void require_same_shape(const Tensor<T>& a, const Tensor<T>& b, const char* op)
+template <Numeric T, Numeric... Ts>
+void require_same_shape(const char* op, const Tensor<T>& first, const Tensor<Ts>&... rest)
 {
-    if (!(a.shape() == b.shape()))
-        throw std::invalid_argument(std::string(op) + ": shapes " + a.shape().str() + " and " +
-                                    b.shape().str() + " do not match");
+    auto check = [&](const auto& t) {
+        if (!(first.shape() == t.shape()))
+            throw std::invalid_argument(std::string(op) + ": shapes " + first.shape().str() + " and " +
+                                        t.shape().str() + " do not match");
+    };
+    (check(rest), ...);
 }
 
 template <Numeric T>
-void require_2d(const Tensor<T>& a, const char* op)
+void require_2d(const char* op, const Tensor<T>& a)
 {
     if (a.ndim() != 2)
         throw std::invalid_argument(std::string(op) + ": expected a 2D tensor, got " + a.shape().str());
 }
 
+// Unsafe: caller must verify matching devices (CPU) and shapes.
 template <Numeric T, typename F>
-void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, const char* op, F f)
+void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, F f)
 {
-    require_same_device(a, b, op);
-    require_same_device(a, out, op);
-    require_cpu(a, op);
-    require_same_shape(a, b, op);
-    require_same_shape(a, out, op);
     const T* pa = a.raw();
     const T* pb = b.raw();
     T* po = out.raw();
@@ -391,16 +301,24 @@ void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, const c
 template <Numeric T>
 void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
-    detail::elementwise(a, b, out, "add_into", [](T x, T y) { return x + y; });
+    detail::require_same_device("add_into", a, b, out);
+    detail::require_same_shape("add_into", a, b, out);
+
+    if (a.device() == Device::CPU) {
+        detail::elementwise(a, b, out, [](T x, T y) { return x + y; });
+    } else {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::add(a.view(), b.view(), out.view());
+#else
+        detail::require_cpu("add_into", a);
+#endif
+    }
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
+Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
 {
-    detail::require_same_device(a, b, "add");
-    detail::require_cpu(a, "add");
-    detail::require_same_shape(a, b, "add");
-    Tensor<T> out(a.shape());
+    Tensor<T> out(a.device(), a.shape());
     add_into(a, b, out);
     return out;
 }
@@ -408,16 +326,24 @@ template <Numeric T>
 template <Numeric T>
 void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
-    detail::elementwise(a, b, out, "sub_into", [](T x, T y) { return x - y; });
+    detail::require_same_device("sub_into", a, b, out);
+    detail::require_same_shape("sub_into", a, b, out);
+
+    if (a.device() == Device::CPU) {
+        detail::elementwise(a, b, out, [](T x, T y) { return x - y; });
+    } else {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::sub(a.view(), b.view(), out.view());
+#else
+        detail::require_cpu("sub_into", a);
+#endif
+    }
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
+Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
 {
-    detail::require_same_device(a, b, "sub");
-    detail::require_cpu(a, "sub");
-    detail::require_same_shape(a, b, "sub");
-    Tensor<T> out(a.shape());
+    Tensor<T> out(a.device(), a.shape());
     sub_into(a, b, out);
     return out;
 }
@@ -425,16 +351,16 @@ template <Numeric T>
 template <Numeric T>
 void hadamard_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
-    detail::elementwise(a, b, out, "hadamard_into", [](T x, T y) { return x * y; });
+    detail::require_same_device("hadamard_into", a, b, out);
+    detail::require_cpu("hadamard_into", a);
+    detail::require_same_shape("hadamard_into", a, b, out);
+    detail::elementwise(a, b, out, [](T x, T y) { return x * y; });
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
+Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 {
-    detail::require_same_device(a, b, "hadamard");
-    detail::require_cpu(a, "hadamard");
-    detail::require_same_shape(a, b, "hadamard");
-    Tensor<T> out(a.shape());
+    Tensor<T> out(a.device(), a.shape());
     hadamard_into(a, b, out);
     return out;
 }
@@ -442,9 +368,9 @@ template <Numeric T>
 template <Numeric T>
 void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 {
-    detail::require_same_device(a, out, "scale_into");
-    detail::require_cpu(a, "scale_into");
-    detail::require_same_shape(a, out, "scale_into");
+    detail::require_same_device("scale_into", a, out);
+    detail::require_cpu("scale_into", a);
+    detail::require_same_shape("scale_into", a, out);
     const T* pa = a.raw();
     T* po = out.raw();
     for (size_t i = 0; i < a.size(); ++i)
@@ -452,18 +378,17 @@ void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> scale(const Tensor<T>& a, T s)
+Tensor<T> scale(const Tensor<T>& a, T s)
 {
-    detail::require_cpu(a, "scale");
-    Tensor<T> out(a.shape());
+    Tensor<T> out(a.device(), a.shape());
     scale_into(a, s, out);
     return out;
 }
 
 template <Numeric T>
-[[nodiscard]] T sum(const Tensor<T>& a)
+T sum(const Tensor<T>& a)
 {
-    detail::require_cpu(a, "sum");
+    detail::require_cpu("sum", a);
     T total{};
     for (size_t i = 0; i < a.size(); ++i)
         total += a.raw()[i];
@@ -471,9 +396,9 @@ template <Numeric T>
 }
 
 template <Numeric T>
-[[nodiscard]] size_t argmax(const Tensor<T>& a)
+size_t argmax(const Tensor<T>& a)
 {
-    detail::require_cpu(a, "argmax");
+    detail::require_cpu("argmax", a);
     if (a.size() == 0)
         throw std::invalid_argument("argmax: tensor is empty");
     const T* p = a.raw();
@@ -486,91 +411,151 @@ template <Numeric T>
 
 // No tensor * tensor operator on purpose: use matmul() or hadamard().
 template <Numeric T>
-[[nodiscard]] Tensor<T> operator+(const Tensor<T>& a, const Tensor<T>& b) { return add(a, b); }
+Tensor<T> operator+(const Tensor<T>& a, const Tensor<T>& b) { return add(a, b); }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> operator-(const Tensor<T>& a, const Tensor<T>& b) { return sub(a, b); }
+Tensor<T> operator-(const Tensor<T>& a, const Tensor<T>& b) { return sub(a, b); }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
+Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
+Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 
 // Results are accumulated (+=) into @out. @out must not alias @a or @b.
+// Batched over leading dimensions: {..., M, K} @ {..., K, N} -> {..., M, N}.
 template <Numeric T>
 void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
-    detail::require_same_device(a, b, "matmul_into");
-    detail::require_same_device(a, out, "matmul_into");
-    detail::require_cpu(a, "matmul_into");
-    detail::require_2d(a, "matmul_into");
-    detail::require_2d(b, "matmul_into");
-    detail::require_2d(out, "matmul_into");
-    const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
-    if (k != b.dim(0))
+    detail::require_same_device("matmul_into", a, b, out);
+
+    const size_t ndim = a.ndim();
+    if (ndim < 2 || b.ndim() != ndim || out.ndim() != ndim)
+        throw std::invalid_argument("matmul_into: inputs and output must have matching rank >= 2");
+
+    size_t batch = 1;
+    for (size_t i = 0; i + 2 < ndim; ++i) {
+        if (a.dim(i) != b.dim(i) || a.dim(i) != out.dim(i))
+            throw std::invalid_argument("matmul_into: batch dimensions of " + a.shape().str() + ", " +
+                                        b.shape().str() + " and " + out.shape().str() + " do not match");
+        batch *= a.dim(i);
+    }
+
+    const size_t M = a.dim(ndim - 2);
+    const size_t K = a.dim(ndim - 1);
+    const size_t N = b.dim(ndim - 1);
+    if (K != b.dim(ndim - 2))
         throw std::invalid_argument("matmul_into: inner dimensions of " + a.shape().str() + " and " +
                                     b.shape().str() + " do not match");
-    if (!(out.shape() == Shape{n, m}))
-        throw std::invalid_argument("matmul_into: expected output shape " + Shape{n, m}.str() +
-                                    ", got " + out.shape().str());
+    if (out.dim(ndim - 2) != M || out.dim(ndim - 1) != N)
+        throw std::invalid_argument("matmul_into: output matrix shape does not match {..., " +
+                                    std::to_string(M) + ", " + std::to_string(N) + "}, got " + out.shape().str());
 
-    const T* pa = a.raw();
-    const T* pb = b.raw();
-    T* po = out.raw();
-    // i-k-j order keeps the inner loop on contiguous memory in b and out.
-#pragma omp parallel for if(n * k * m >= 200000)
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t p = 0; p < k; ++p) {
-            const T a_ip = pa[i * k + p];
-            for (size_t j = 0; j < m; ++j)
-                po[i * m + j] += a_ip * pb[p * m + j];
+    if (batch == 0 || M == 0 || K == 0 || N == 0)
+        return;
+
+    if (a.device() == Device::CPU) {
+        const size_t a_stride = M * K;
+        const size_t b_stride = K * N;
+        const size_t c_stride = M * N;
+
+        // i-k-j order keeps the inner loop on contiguous memory in b and out.
+        #pragma omp parallel for collapse(2) if(batch * M * K * N >= 200000)
+        for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+            for (size_t i = 0; i < M; ++i) {
+                const T* pa = a.raw()   + batch_idx * a_stride;
+                const T* pb = b.raw()   + batch_idx * b_stride;
+                T*       po = out.raw() + batch_idx * c_stride;
+                for (size_t p = 0; p < K; ++p) {
+                    const T a_ip = pa[i * K + p];
+                    for (size_t j = 0; j < N; ++j)
+                        po[i * N + j] += a_ip * pb[p * N + j];
+                }
+            }
         }
+    }
+    else {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::matmul(a.view(), b.view(), out.view());
+#else
+        detail::require_cpu("matmul_into", a);
+#endif
     }
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
+Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
 {
-    detail::require_same_device(a, b, "matmul");
-    detail::require_cpu(a, "matmul");
-    detail::require_2d(a, "matmul");
-    detail::require_2d(b, "matmul");
-    const size_t n = a.dim(0), k = a.dim(1), m = b.dim(1);
-    if (k != b.dim(0))
-        throw std::invalid_argument("matmul: inner dimensions of " + a.shape().str() + " and " +
-                                    b.shape().str() + " do not match");
+    const size_t ndim = a.ndim();
+    if (ndim < 2 || b.ndim() != ndim)
+        throw std::invalid_argument("matmul: inputs must have matching rank >= 2");
 
-    Tensor<T> out(n, m);
+    Shape out_shape = a.shape();
+    out_shape.dims[ndim - 1] = b.dim(ndim - 1);
+
+    Tensor<T> out(a.device(), out_shape);
     matmul_into(a, b, out);
     return out;
 }
 
-// Writes a^T into @out. @out must not alias @a.
+// Writes a^T into @out, swapping the last two dimensions: {..., R, C} -> {..., C, R}.
+// @out must not alias @a.
 template <Numeric T>
 void transpose_into(const Tensor<T>& a, Tensor<T>& out)
 {
-    detail::require_same_device(a, out, "transpose_into");
-    detail::require_cpu(a, "transpose_into");
-    detail::require_2d(a, "transpose_into");
-    const size_t r = a.dim(0), c = a.dim(1);
-    if (!(out.shape() == Shape{c, r}))
-        throw std::invalid_argument("transpose_into: expected output shape " + Shape{c, r}.str() +
-                                    ", got " + out.shape().str());
+    detail::require_same_device("transpose_into", a, out);
 
-    const T* pa = a.raw();
-    T* po = out.raw();
-    for (size_t i = 0; i < r; ++i)
-        for (size_t j = 0; j < c; ++j)
-            po[j * r + i] = pa[i * c + j];
+    const size_t ndim = a.ndim();
+    if (ndim < 2 || out.ndim() != ndim)
+        throw std::invalid_argument("transpose_into: input and output must have matching rank >= 2");
+
+    size_t batch = 1;
+    for (size_t i = 0; i + 2 < ndim; ++i) {
+        if (a.dim(i) != out.dim(i))
+            throw std::invalid_argument("transpose_into: batch dimensions of " + a.shape().str() +
+                                        " and " + out.shape().str() + " do not match");
+        batch *= a.dim(i);
+    }
+
+    const size_t R = a.dim(ndim - 2);
+    const size_t C = a.dim(ndim - 1);
+    if (out.dim(ndim - 2) != C || out.dim(ndim - 1) != R)
+        throw std::invalid_argument("transpose_into: output matrix shape does not match {..., " +
+                                    std::to_string(C) + ", " + std::to_string(R) + "}, got " + out.shape().str());
+
+    if (batch == 0 || R == 0 || C == 0)
+        return;
+
+    if (a.device() == Device::CPU) {
+        const size_t stride = R * C;
+        for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+            const T* pa = a.raw()   + batch_idx * stride;
+            T*       po = out.raw() + batch_idx * stride;
+            for (size_t i = 0; i < R; ++i)
+                for (size_t j = 0; j < C; ++j)
+                    po[j * R + i] = pa[i * C + j];
+        }
+    }
+    else {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::transpose(a.view(), out.view());
+#else
+        detail::require_cpu("transpose_into", a);
+#endif
+    }
 }
 
 template <Numeric T>
-[[nodiscard]] Tensor<T> transpose(const Tensor<T>& a)
+Tensor<T> transpose(const Tensor<T>& a)
 {
-    detail::require_cpu(a, "transpose");
-    detail::require_2d(a, "transpose");
-    Tensor<T> out(a.dim(1), a.dim(0));
+    const size_t ndim = a.ndim();
+    if (ndim < 2)
+        throw std::invalid_argument("transpose: expected tensor of rank >= 2, got " + a.shape().str());
+
+    Shape out_shape = a.shape();
+    std::swap(out_shape.dims[ndim - 2], out_shape.dims[ndim - 1]);
+
+    Tensor<T> out(a.device(), out_shape);
     transpose_into(a, out);
     return out;
 }

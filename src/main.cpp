@@ -27,6 +27,10 @@ int main(int argc, char** argv) {
     cnn.add(std::make_unique<DenseLayer<fp32>>(400, 64));
     cnn.add(std::make_unique<ReLULayer<fp32>>());
     cnn.add(std::make_unique<DenseLayer<fp32>>(64, 10));
+
+#ifdef __GPU_ACCELERATION_CUDA
+    cnn.to(Device::CUDA);
+#endif
     
     auto optimizer = SGDOptimizer<fp32>(cnn.params(), 0.05f);
     auto loss      = CrossEntropyLoss<fp32>();
@@ -39,6 +43,10 @@ int main(int argc, char** argv) {
 
         for (size_t i = 0; i < mnist_train.size(); i += batch_size) {
             auto batch = gather_batch(mnist_train, indices, i, batch_size);
+#ifdef __GPU_ACCELERATION_CUDA
+            batch.inputs = batch.inputs.to(Device::CUDA);
+            batch.targets = batch.targets.to(Device::CUDA);
+#endif
 
             auto out = cnn.forward(batch.inputs);
             auto l = loss.forward(out, batch.targets);
@@ -55,6 +63,10 @@ int main(int argc, char** argv) {
     std::iota(eval_idx.begin(), eval_idx.end(), 0);
 
     size_t correct = 0;
+
+#ifdef __GPU_ACCELERATION_CUDA
+    cnn.to(Device::CPU);
+#endif
 
     for (size_t i = 0; i < mnist_eval.size(); i += batch_size) {
         auto batch = gather_batch(mnist_eval, eval_idx, i, batch_size);
