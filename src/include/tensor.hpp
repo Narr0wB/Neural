@@ -9,10 +9,12 @@
 #include <concepts>
 #include <cstddef>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -33,6 +35,15 @@ enum class Device {
     CPU,
     CUDA
 };
+
+inline constexpr std::string_view device_name(Device d)
+{
+    switch (d) {
+        case Device::CPU:  return "CPU";
+        case Device::CUDA: return "CUDA";
+    }
+    return "unknown";
+}
 
 // Copies are shallow: `Tensor b = a;` shares a's buffer, and so do slice(),
 // reshape() and flatten(). Use clone() for an independent copy.
@@ -58,8 +69,9 @@ public:
             T* raw_ptr = nullptr;
             const size_t bytes = size() * sizeof(T);
             if (bytes > 0) {
-                CUDA_CHECK(cudaMalloc(&raw_ptr, bytes));
-                data = std::shared_ptr<T[]>(raw_ptr, [](T* p) { if (p) cudaFree(p); });
+                cuda_ops::init_mem_pool();
+                CUDA_CHECK(cudaMallocAsync(&raw_ptr, bytes, 0));
+                data = std::shared_ptr<T[]>(raw_ptr, [](T* p) { if (p) cudaFreeAsync(p, 0); });
             }
 #else
             throw std::runtime_error("Tensor: CUDA support not compiled in");
@@ -246,22 +258,14 @@ public:
 };
 
 namespace detail {
-inline const char* device_name(Device d)
-{
-    switch (d) {
-        case Device::CPU:  return "CPU";
-        case Device::CUDA: return "CUDA";
-    }
-    return "unknown";
-}
-
 template <Numeric T, Numeric... Ts>
 void require_same_device(const char* op, const Tensor<T>& first, const Tensor<Ts>&... rest)
 {
     auto check = [&](const auto& t) {
         if (t.device() != first.device())
             throw std::invalid_argument(std::string(op) + ": tensors are on different devices (" +
-                                        device_name(first.device()) + " vs " + device_name(t.device()) + ")");
+                                        std::string(device_name(first.device())) + " vs " +
+                                        std::string(device_name(t.device())) + ")");
     };
     (check(rest), ...);
 }
@@ -298,8 +302,80 @@ void elementwise(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, F f)
     const T* pa = a.raw();
     const T* pb = b.raw();
     T* po = out.raw();
-    for (size_t i = 0; i < a.size(); ++i)
+    for (size_t i = 0; i < out.size(); ++i)
         po[i] = f(pa[i], pb[i]);
+}
+
+// Unsafe: caller must verify matching devices (CPU) and out.shape() == a.shape().broadcast_to(b.shape()).
+template <Numeric T, typename F>
+void elementwise_broadcast(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out, F f)
+{
+    const size_t n = out.size();
+    if (n == 0)
+        return;
+
+    const Shape& sa = a.shape();
+    const Shape& sb = b.shape();
+    const Shape& so = out.shape();
+    const size_t ndim = so.ndim;
+
+    size_t a_stride[MAX_DIMS] = {};
+    size_t b_stride[MAX_DIMS] = {};
+    size_t sa_acc = 1, sb_acc = 1;
+    for (size_t k = ndim; k-- > 0;) {
+        if (k + sa.ndim >= ndim) {
+            const size_t d = sa[k + sa.ndim - ndim];
+            a_stride[k] = (d == 1) ? 0 : sa_acc;
+            sa_acc *= d;
+        }
+        if (k + sb.ndim >= ndim) {
+            const size_t d = sb[k + sb.ndim - ndim];
+            b_stride[k] = (d == 1) ? 0 : sb_acc;
+            sb_acc *= d;
+        }
+    }
+
+    const T* pa = a.raw();
+    const T* pb = b.raw();
+    T* po = out.raw();
+
+    const size_t inner  = so[ndim - 1];
+    const size_t outer  = n / inner;
+    const bool a_contig = (a_stride[ndim - 1] == 1);
+    const bool b_contig = (b_stride[ndim - 1] == 1);
+
+    for (size_t row = 0; row < outer; ++row) {
+        size_t rem = row, ia = 0, ib = 0;
+        for (size_t k = ndim - 1; k-- > 1;) {
+            const size_t coord = rem % so[k];
+            rem /= so[k];
+            ia += coord * a_stride[k];
+            ib += coord * b_stride[k];
+        }
+        if (ndim > 1) {
+            ia += rem * a_stride[0];
+            ib += rem * b_stride[0];
+        }
+
+        const T* pa_row = pa + ia;
+        const T* pb_row = pb + ib;
+        T*       po_row = po + row * inner;
+
+        if (a_contig && b_contig) {
+            for (size_t j = 0; j < inner; ++j)
+                po_row[j] = f(pa_row[j], pb_row[j]);
+        } else if (a_contig) {
+            const T bv = *pb_row;
+            for (size_t j = 0; j < inner; ++j)
+                po_row[j] = f(pa_row[j], bv);
+        } else if (b_contig) {
+            const T av = *pa_row;
+            for (size_t j = 0; j < inner; ++j)
+                po_row[j] = f(av, pb_row[j]);
+        } else {
+            std::fill_n(po_row, inner, f(*pa_row, *pb_row));
+        }
+    }
 }
 } // namespace detail
 
@@ -307,10 +383,16 @@ template <Numeric T>
 void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
     detail::require_same_device("add_into", a, b, out);
-    detail::require_same_shape("add_into", a, b, out);
+
+    const bool same = (a.shape() == b.shape()) && (b.shape() == out.shape());
+    if (!same && !(a.shape().broadcast_to(b.shape()) == out.shape()))
+        throw std::invalid_argument("add_into: output shape " + out.shape().str() +
+                                    " does not match broadcast of " + a.shape().str() + " and " + b.shape().str());
 
     if (a.device() == Device::CPU) {
-        detail::elementwise(a, b, out, [](T x, T y) { return x + y; });
+        auto op = [](T x, T y) { return x + y; };
+        if (same) detail::elementwise(a, b, out, op);
+        else      detail::elementwise_broadcast(a, b, out, op);
     } else {
 #ifdef __GPU_ACCELERATION_CUDA
         cuda_ops::add(a.view(), b.view(), out.view());
@@ -323,7 +405,7 @@ void add_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> add(const Tensor<T>& a, const Tensor<T>& b)
 {
-    Tensor<T> out(a.device(), a.shape());
+    Tensor<T> out(a.device(), a.shape().broadcast_to(b.shape()));
     add_into(a, b, out);
     return out;
 }
@@ -332,10 +414,16 @@ template <Numeric T>
 void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
     detail::require_same_device("sub_into", a, b, out);
-    detail::require_same_shape("sub_into", a, b, out);
+
+    const bool same = (a.shape() == b.shape()) && (b.shape() == out.shape());
+    if (!same && !(a.shape().broadcast_to(b.shape()) == out.shape()))
+        throw std::invalid_argument("sub_into: output shape " + out.shape().str() +
+                                    " does not match broadcast of " + a.shape().str() + " and " + b.shape().str());
 
     if (a.device() == Device::CPU) {
-        detail::elementwise(a, b, out, [](T x, T y) { return x - y; });
+        auto op = [](T x, T y) { return x - y; };
+        if (same) detail::elementwise(a, b, out, op);
+        else      detail::elementwise_broadcast(a, b, out, op);
     } else {
 #ifdef __GPU_ACCELERATION_CUDA
         cuda_ops::sub(a.view(), b.view(), out.view());
@@ -348,7 +436,7 @@ void sub_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 template <Numeric T>
 Tensor<T> sub(const Tensor<T>& a, const Tensor<T>& b)
 {
-    Tensor<T> out(a.device(), a.shape());
+    Tensor<T> out(a.device(), a.shape().broadcast_to(b.shape()));
     sub_into(a, b, out);
     return out;
 }
@@ -358,14 +446,21 @@ void hadamard_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
 {
     detail::require_same_device("hadamard_into", a, b, out);
     detail::require_cpu("hadamard_into", a);
-    detail::require_same_shape("hadamard_into", a, b, out);
-    detail::elementwise(a, b, out, [](T x, T y) { return x * y; });
+
+    const bool same = (a.shape() == b.shape()) && (b.shape() == out.shape());
+    if (!same && !(a.shape().broadcast_to(b.shape()) == out.shape()))
+        throw std::invalid_argument("hadamard_into: output shape " + out.shape().str() +
+                                    " does not match broadcast of " + a.shape().str() + " and " + b.shape().str());
+
+    auto op = [](T x, T y) { return x * y; };
+    if (same) detail::elementwise(a, b, out, op);
+    else      detail::elementwise_broadcast(a, b, out, op);
 }
 
 template <Numeric T>
 Tensor<T> hadamard(const Tensor<T>& a, const Tensor<T>& b)
 {
-    Tensor<T> out(a.device(), a.shape());
+    Tensor<T> out(a.device(), a.shape().broadcast_to(b.shape()));
     hadamard_into(a, b, out);
     return out;
 }
@@ -374,8 +469,9 @@ template <Numeric T>
 void scale_into(const Tensor<T>& a, T s, Tensor<T>& out)
 {
     detail::require_same_device("scale_into", a, out);
-    detail::require_cpu("scale_into", a);
     detail::require_same_shape("scale_into", a, out);
+    detail::require_cpu("scale_into", a);
+
     const T* pa = a.raw();
     T* po = out.raw();
     for (size_t i = 0; i < a.size(); ++i)
@@ -390,15 +486,74 @@ Tensor<T> scale(const Tensor<T>& a, T s)
     return out;
 }
 
-template <Numeric T>
-T sum(const Tensor<T>& a)
+template <ReduceOp op = ReduceOp::SUM, Numeric T>
+void reduce_into(const Tensor<T>& x, size_t axis, Tensor<T>& out)
 {
-    detail::require_cpu("sum", a);
-    T total{};
-    for (size_t i = 0; i < a.size(); ++i)
-        total += a.raw()[i];
-    return total;
+    detail::require_same_device("reduce_into", x, out);
+
+    if (x.device() == Device::CUDA) {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::reduce<op>(x.view(), axis, out.view());
+        return;
+#else
+        detail::require_cpu("reduce_into", x);
+#endif
+    }
+
+    const Shape in_shape = x.shape();
+    if (axis >= in_shape.ndim)
+        throw std::invalid_argument("reduce_into: invalid axis");
+
+    size_t outer_stride = 1;
+    size_t inner_stride = 1;
+    for (size_t i = 0; i < axis; i++)
+        outer_stride *= in_shape[i];
+    for (size_t i = axis + 1; i < in_shape.ndim; i++)
+        inner_stride *= in_shape[i];
+
+    if (out.size() != outer_stride * inner_stride)
+        throw std::invalid_argument("reduce_into: invalid output shape");
+
+    const size_t axis_len = in_shape[axis];
+    const T* px = x.raw();
+    T*       po = out.raw();
+
+    if (inner_stride == 1) {
+        for (size_t i = 0; i < outer_stride; ++i) {
+            const T* px_row = px + i * axis_len;
+            T acc = T{0};
+            for (size_t k = 0; k < axis_len; ++k)
+                acc += px_row[k];
+            if constexpr (op == ReduceOp::SUM)
+                po[i] += acc;
+            else if constexpr (op == ReduceOp::SUB)
+                po[i] -= acc;
+        }
+    } else {
+        for (size_t i = 0; i < outer_stride; ++i) {
+            T* po_row = po + i * inner_stride;
+            for (size_t k = 0; k < axis_len; ++k) {
+                const T* px_row = px + (i * axis_len + k) * inner_stride;
+                for (size_t j = 0; j < inner_stride; ++j) {
+                    if constexpr (op == ReduceOp::SUM)
+                        po_row[j] += px_row[j];
+                    else if constexpr (op == ReduceOp::SUB)
+                        po_row[j] -= px_row[j];
+                }
+            }
+        }
+    }
 }
+
+
+template <ReduceOp op = ReduceOp::SUM, Numeric T>
+Tensor<T> reduce(const Tensor<T>& x, size_t axis)
+{
+    Tensor<T> out = Tensor<T>::zeros(x.device(), x.shape().reduce(axis));
+    reduce_into<op>(x, axis, out);
+    return out;
+}
+
 
 template <Numeric T>
 size_t argmax(const Tensor<T>& a)
@@ -427,12 +582,21 @@ Tensor<T> operator*(const Tensor<T>& a, T s) { return scale(a, s); }
 template <Numeric T>
 Tensor<T> operator*(T s, const Tensor<T>& a) { return scale(a, s); }
 
-// Results are accumulated (+=) into @out. @out must not alias @a or @b.
-// Batched over leading dimensions: {..., M, K} @ {..., K, N} -> {..., M, N}.
+// @out must not alias @a or @b.
 template <Numeric T>
-void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
+void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out,
+                 bool trans_a = false, bool trans_b = false, bool accumulate = true)
 {
     detail::require_same_device("matmul_into", a, b, out);
+
+    if (a.device() == Device::CUDA) {
+#ifdef __GPU_ACCELERATION_CUDA
+        cuda_ops::matmul(a.view(), b.view(), out.view(), trans_a, trans_b, accumulate);
+        return;
+#else
+        detail::require_cpu("matmul_into", a);
+#endif
+    }
 
     const size_t ndim = a.ndim();
     if (ndim < 2 || b.ndim() != ndim || out.ndim() != ndim)
@@ -446,10 +610,11 @@ void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
         batch *= a.dim(i);
     }
 
-    const size_t M = a.dim(ndim - 2);
-    const size_t K = a.dim(ndim - 1);
-    const size_t N = b.dim(ndim - 1);
-    if (K != b.dim(ndim - 2))
+    const size_t M   = trans_a ? a.dim(ndim - 1) : a.dim(ndim - 2);
+    const size_t K   = trans_a ? a.dim(ndim - 2) : a.dim(ndim - 1);
+    const size_t K_b = trans_b ? b.dim(ndim - 1) : b.dim(ndim - 2);
+    const size_t N   = trans_b ? b.dim(ndim - 2) : b.dim(ndim - 1);
+    if (K != K_b)
         throw std::invalid_argument("matmul_into: inner dimensions of " + a.shape().str() + " and " +
                                     b.shape().str() + " do not match");
     if (out.dim(ndim - 2) != M || out.dim(ndim - 1) != N)
@@ -459,47 +624,80 @@ void matmul_into(const Tensor<T>& a, const Tensor<T>& b, Tensor<T>& out)
     if (batch == 0 || M == 0 || K == 0 || N == 0)
         return;
 
-    if (a.device() == Device::CPU) {
-        const size_t a_stride = M * K;
-        const size_t b_stride = K * N;
-        const size_t c_stride = M * N;
+    const size_t a_stride = M * K;
+    const size_t b_stride = K * N;
+    const size_t c_stride = M * N;
 
-        // i-k-j order keeps the inner loop on contiguous memory in b and out.
+    if (!trans_b) {
+        const size_t a_rs = trans_a ? 1 : K, a_cs = trans_a ? M : 1;
+        // i-k-j order keeps the inner loop unit-stride in both out and b for SIMD vectorization.
         #pragma omp parallel for collapse(2) if(batch * M * K * N >= 200000)
         for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
             for (size_t i = 0; i < M; ++i) {
-                const T* pa = a.raw()   + batch_idx * a_stride;
-                const T* pb = b.raw()   + batch_idx * b_stride;
-                T*       po = out.raw() + batch_idx * c_stride;
+                const T* pa     = a.raw()   + batch_idx * a_stride;
+                const T* pb     = b.raw()   + batch_idx * b_stride;
+                T*       po_row = out.raw() + batch_idx * c_stride + i * N;
+                if (!accumulate)
+                    std::fill_n(po_row, N, T{0});
                 for (size_t p = 0; p < K; ++p) {
-                    const T a_ip = pa[i * K + p];
+                    const T  a_ip   = pa[i * a_rs + p * a_cs];
+                    const T* pb_row = pb + p * N;
                     for (size_t j = 0; j < N; ++j)
-                        po[i * N + j] += a_ip * pb[p * N + j];
+                        po_row[j] += a_ip * pb_row[j];
+                }
+            }
+        }
+    } else if (!trans_a) {
+        // i-j-k dot product keeps both a and b^T unit-stride in the inner loop.
+        #pragma omp parallel for collapse(2) if(batch * M * K * N >= 200000)
+        for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+            for (size_t i = 0; i < M; ++i) {
+                const T* pa_row = a.raw()   + batch_idx * a_stride + i * K;
+                const T* pb     = b.raw()   + batch_idx * b_stride;
+                T*       po_row = out.raw() + batch_idx * c_stride + i * N;
+                for (size_t j = 0; j < N; ++j) {
+                    const T* pb_row = pb + j * K;
+                    T acc = accumulate ? po_row[j] : T{0};
+                    for (size_t p = 0; p < K; ++p)
+                        acc += pa_row[p] * pb_row[p];
+                    po_row[j] = acc;
+                }
+            }
+        }
+    } else {
+        // Both transposed: i-j-k keeps b^T unit-stride in the inner loop.
+        #pragma omp parallel for collapse(2) if(batch * M * K * N >= 200000)
+        for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+            for (size_t i = 0; i < M; ++i) {
+                const T* pa     = a.raw()   + batch_idx * a_stride;
+                const T* pb     = b.raw()   + batch_idx * b_stride;
+                T*       po_row = out.raw() + batch_idx * c_stride + i * N;
+                for (size_t j = 0; j < N; ++j) {
+                    const T* pb_row = pb + j * K;
+                    T acc = accumulate ? po_row[j] : T{0};
+                    for (size_t p = 0; p < K; ++p)
+                        acc += pa[p * M + i] * pb_row[p];
+                    po_row[j] = acc;
                 }
             }
         }
     }
-    else {
-#ifdef __GPU_ACCELERATION_CUDA
-        cuda_ops::matmul(a.view(), b.view(), out.view());
-#else
-        detail::require_cpu("matmul_into", a);
-#endif
-    }
 }
 
 template <Numeric T>
-Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b)
+Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b,
+                 bool trans_a = false, bool trans_b = false)
 {
     const size_t ndim = a.ndim();
     if (ndim < 2 || b.ndim() != ndim)
         throw std::invalid_argument("matmul: inputs must have matching rank >= 2");
 
     Shape out_shape = a.shape();
-    out_shape.dims[ndim - 1] = b.dim(ndim - 1);
+    out_shape.dims[ndim - 2] = trans_a ? a.dim(ndim - 1) : a.dim(ndim - 2);
+    out_shape.dims[ndim - 1] = trans_b ? b.dim(ndim - 2) : b.dim(ndim - 1);
 
-    Tensor<T> out = Tensor<T>::zeros(a.device(), out_shape);
-    matmul_into(a, b, out);
+    Tensor<T> out(a.device(), out_shape);
+    matmul_into(a, b, out, trans_a, trans_b, /*accumulate=*/false);
     return out;
 }
 

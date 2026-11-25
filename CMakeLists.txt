@@ -15,6 +15,7 @@ add_library(neural_core
 target_include_directories(neural_core PUBLIC src/include)
 target_compile_options(neural_core PUBLIC
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
 )
 
 find_package(OpenMP)
@@ -28,6 +29,9 @@ if(USE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     target_sources(neural_core PRIVATE src/cuda/cuda_ops.cu)
     target_compile_definitions(neural_core PUBLIC __GPU_ACCELERATION_CUDA)
+
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(neural_core PUBLIC CUDA::cudart CUDA::cublas)
 endif()
 
 # Main executable

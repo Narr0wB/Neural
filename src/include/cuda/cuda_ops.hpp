@@ -6,6 +6,8 @@
 
 namespace cuda_ops {
 
+void init_mem_pool();
+
 template <Numeric T>
 void fill(TensorView<T> out, T value);
 
@@ -16,7 +18,8 @@ template <Numeric T>
 void sub(TensorView<const T> a, TensorView<const T> b, TensorView<T> out);
 
 template <Numeric T>
-void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out);
+void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out,
+            bool trans_a = false, bool trans_b = false, bool accumulate = true);
 
 template <Numeric T>
 void transpose(TensorView<const T> a, TensorView<T> out);
@@ -44,10 +47,16 @@ void conv2d_backward(TensorView<const T> input, TensorView<const T> filters, Ten
                      TensorView<T> filters_grad, TensorView<T> bias_grad, TensorView<T> dX);
 
 template <Numeric T>
-T cross_entropy_forward(TensorView<const T> pred, TensorView<const T> target, TensorView<T> probs);
+void cross_entropy_forward(TensorView<const T> pred, TensorView<const T> target, TensorView<T> probs, TensorView<T> loss);
 
 template <Numeric T>
 void cross_entropy_backward(TensorView<const T> probs, TensorView<const T> target, TensorView<T> out);
+
+template <ReduceOp op, Numeric T>
+void reduce(TensorView<const T> x, size_t axis, TensorView<T> out);
+
+template <Numeric T>
+void gather(TensorView<const T> src, TensorView<const size_t> indices, TensorView<T> out);
 
 } // namespace cuda_ops
 

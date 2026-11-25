@@ -11,8 +11,9 @@
 
 template <std::floating_point T = fp32, typename Target = Tensor<T>>
 struct Loss {
-    virtual T forward(const Tensor<T>& pred, const Target& target) = 0;
+    virtual void forward(const Tensor<T>& pred, const Target& target) = 0;
     virtual Tensor<T> backward() = 0;
+    virtual T loss() = 0;
     virtual ~Loss() = default;
 };
 
@@ -21,7 +22,7 @@ template <std::floating_point T = fp32, typename Target = Tensor<T>>
 struct CrossEntropyLoss : Loss<T, Target> {
     explicit CrossEntropyLoss() = default;
 
-    T forward(const Tensor<T>& pred, const Target& target) override
+    void forward(const Tensor<T>& pred, const Target& target) override
     {
         detail::require_same_device("CrossEntropyLoss::forward", pred, target);
 
@@ -35,8 +36,8 @@ struct CrossEntropyLoss : Loss<T, Target> {
         const size_t L = in_shape[1];
 
         probs_ = Tensor<T>(pred.device(), N, L);
+        loss_  = Tensor<T>(pred.device(), N);
 
-        T out = 0;
         if (pred.device() == Device::CPU) {
             for (size_t n = 0; n < N; n++) {
                 auto current_pred   = pred.slice(n);
@@ -47,27 +48,26 @@ struct CrossEntropyLoss : Loss<T, Target> {
                     max = std::max(max, current_pred(i));
 
                 T log_arg = 0;
+                T acc     = 0;
                 for (size_t i = 0; i < L; i++) {
                     T e = std::exp(current_pred(i) - max);
                     probs_(n, i) = e;
-                    out -= current_target(i) * (current_pred(i) - max);
+                    acc -= current_target(i) * (current_pred(i) - max);
                     log_arg += e;
                 }
                 for (size_t i = 0; i < L; i++)
                     probs_(n, i) /= log_arg;
 
-                out += std::log(log_arg);
+                loss_(n) = acc + std::log(log_arg);
             }
         }
         else {
 #ifdef __GPU_ACCELERATION_CUDA
-            return cuda_ops::cross_entropy_forward(pred.view(), target.view(), probs_.view());
+            cuda_ops::cross_entropy_forward(pred.view(), target.view(), probs_.view(), loss_.view());
 #else
             detail::require_cpu("CrossEntropyLoss::forward", pred);
 #endif
         }
-
-        return out / static_cast<T>(N);
     }
 
     Tensor<T> backward() override
@@ -94,7 +94,14 @@ struct CrossEntropyLoss : Loss<T, Target> {
         return out;
     }
 
+    T loss() override
+    {
+        const size_t N = target_.dim(0);
+        return reduce(loss_.to(Device::CPU), 0)(0) / static_cast<T>(N);
+    }
+
 private:
+    Tensor<T> loss_;
     Tensor<T> probs_;
     Target    target_;
 };

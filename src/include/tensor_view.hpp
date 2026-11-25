@@ -50,6 +50,11 @@ typedef int64_t  i64;
 
 inline constexpr size_t MAX_DIMS = 4;
 
+enum class ReduceOp {
+    SUM,
+    SUB,
+};
+
 // Plain array instead of std::array so it can be used inside CUDA kernels.
 struct Shape {
     size_t dims[MAX_DIMS] = {};
@@ -95,6 +100,43 @@ struct Shape {
             if (dims[i] != o.dims[i])
                 return false;
         return true;
+    }
+
+    Shape reduce(size_t axis) const
+    {
+        if (axis >= ndim)
+            return *this;
+        if (ndim == 1)
+            return Shape({1});
+
+        Shape out;
+        for (size_t i = 0; i < ndim; i++) {
+            if (i == axis) continue;
+            out.dims[out.ndim++] = dims[i];
+        }
+
+        return out;
+    }
+
+    Shape broadcast_to(const Shape& other) const
+    {
+        const size_t out_ndim = ndim > other.ndim ? ndim : other.ndim;
+        Shape out;
+        out.ndim = out_ndim;
+        for (size_t i = 0; i < out_ndim; ++i) {
+            const size_t da = (i + ndim >= out_ndim) ? dims[i + ndim - out_ndim] : 1;
+            const size_t db = (i + other.ndim >= out_ndim) ? other[i + other.ndim - out_ndim] : 1;
+            if (da == db)
+                out.dims[i] = da;
+            else if (da == 1)
+                out.dims[i] = db;
+            else if (db == 1)
+                out.dims[i] = da;
+            else
+                throw std::invalid_argument("Shape::broadcast_to: shapes " + str() + " and " + other.str() +
+                                            " are not broadcast-compatible");
+        }
+        return out;
     }
 
     std::string str() const

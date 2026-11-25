@@ -19,9 +19,9 @@ struct Dataset {
 
 // Copies up to @batch_size samples from @ds at @indices[start .. start + B)
 // into a contiguous mini-batch Dataset (works for any input/target tensor rank).
-Dataset gather_batch(const Dataset& ds, const std::vector<size_t>& indices, size_t start, size_t batch_size);
+Dataset gather_batch(const Dataset& ds, const Tensor<size_t>& indices, size_t start, size_t batch_size);
 
-// Returns a randomly shuffled permutation of [0, n).
-std::vector<size_t> shuffled_indices(size_t n);
+// Returns a randomly shuffled permutation of [0, n) on @dev.
+Tensor<size_t> shuffled_indices(size_t n, Device dev = Device::CPU);
 
 #endif // DATASET_HPP

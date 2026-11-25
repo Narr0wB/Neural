@@ -35,32 +35,36 @@ int main(int argc, char** argv) {
     auto optimizer = SGDOptimizer<fp32>(cnn.params(), 0.05f);
     auto loss      = CrossEntropyLoss<fp32>();
 
-    const size_t batch_size = 32;
+    const size_t batch_size = 64;
     const size_t epochs     = 5;
 
+#ifdef __GPU_ACCELERATION_CUDA
+    mnist_train.inputs  = mnist_train.inputs.to(Device::CUDA);
+    mnist_train.targets = mnist_train.targets.to(Device::CUDA);
+#endif
+
+    std::cout << std::format("Starting training on device: {}. batch_size: {}, epochs: {}",
+                             device_name(mnist_train.inputs.device()), batch_size, epochs) << std::endl;
+
     for (size_t e = 0; e < epochs; e++) {
-        auto indices = shuffled_indices(mnist_train.size());
+        auto indices = shuffled_indices(mnist_train.size(), mnist_train.inputs.device());
 
         for (size_t i = 0; i < mnist_train.size(); i += batch_size) {
             auto batch = gather_batch(mnist_train, indices, i, batch_size);
-#ifdef __GPU_ACCELERATION_CUDA
-            batch.inputs = batch.inputs.to(Device::CUDA);
-            batch.targets = batch.targets.to(Device::CUDA);
-#endif
 
             auto out = cnn.forward(batch.inputs);
-            auto l = loss.forward(out, batch.targets);
+            loss.forward(out, batch.targets);
             cnn.backward(loss.backward());
 
             optimizer.optimize();
             optimizer.zero_grads();
-
-            std::cout << std::format("batch {} | CELoss: {}", i, l) << std::endl;
         }
+        auto l = loss.loss();
+        std::cout << std::format("epoch {} | CELoss: {}", e, l) << std::endl;
     }
 
-    std::vector<size_t> eval_idx(mnist_eval.size());
-    std::iota(eval_idx.begin(), eval_idx.end(), 0);
+    Tensor<size_t> eval_idx(mnist_eval.size());
+    std::iota(eval_idx.raw(), eval_idx.raw() + mnist_eval.size(), size_t{0});
 
     size_t correct = 0;
 

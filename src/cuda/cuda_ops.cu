@@ -3,10 +3,24 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
+#include <cublas_v2.h>
+
 #define ROUND_UP(n, BLOCK) (((n) + (BLOCK) - 1) / (BLOCK))
+
+#define CUBLAS_CHECK(call)                                                      \
+    do {                                                                        \
+        cublasStatus_t status_ = (call);                                        \
+        if (status_ != CUBLAS_STATUS_SUCCESS)                                   \
+            throw std::runtime_error("cuBLAS error: code " +                    \
+                                     std::to_string(static_cast<int>(status_)) +\
+                                     " at " + __FILE__ + ":" +                  \
+                                     std::to_string(__LINE__));                 \
+    } while (0)
 
 constexpr size_t BLOCK      = 256;
 constexpr size_t TILE       = 16;
@@ -14,12 +28,64 @@ constexpr size_t MAX_GRID_Z = 65535;
 
 namespace {
 
+struct CUBLASHandle {
+    cublasHandle_t handle = nullptr;
+    CUBLASHandle()  { CUBLAS_CHECK(cublasCreate(&handle)); }
+    ~CUBLASHandle() { if (handle) cublasDestroy(handle); }
+    CUBLASHandle(const CUBLASHandle&)            = delete;
+    CUBLASHandle& operator=(const CUBLASHandle&) = delete;
+};
+
+inline cublasHandle_t get_cublas_handle()
+{
+    static CUBLASHandle instance;
+    return instance.handle;
+}
+
+struct CudaMemPoolConfig {
+    CudaMemPoolConfig()
+    {
+        int device = 0;
+        CUDA_CHECK(cudaGetDevice(&device));
+        cudaMemPool_t pool = nullptr;
+        CUDA_CHECK(cudaDeviceGetDefaultMemPool(&pool, device));
+        u64 threshold = std::numeric_limits<u64>::max();
+        CUDA_CHECK(cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold));
+    }
+    CudaMemPoolConfig(const CudaMemPoolConfig&)            = delete;
+    CudaMemPoolConfig& operator=(const CudaMemPoolConfig&) = delete;
+};
+
 template <Numeric T>
 __global__ void fill_kernel(TensorView<T> dst, T value)
 {
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < dst.size())
         dst.data[i] = value;
+}
+
+struct BroadcastStrides {
+    size_t a[MAX_DIMS] = {};
+    size_t b[MAX_DIMS] = {};
+};
+
+inline BroadcastStrides make_broadcast_strides(const Shape& sa, const Shape& sb, const Shape& so)
+{
+    BroadcastStrides st;
+    size_t sa_acc = 1, sb_acc = 1;
+    for (size_t k = so.ndim; k-- > 0;) {
+        if (k + sa.ndim >= so.ndim) {
+            const size_t d = sa[k + sa.ndim - so.ndim];
+            st.a[k] = (d == 1) ? 0 : sa_acc;
+            sa_acc *= d;
+        }
+        if (k + sb.ndim >= so.ndim) {
+            const size_t d = sb[k + sb.ndim - so.ndim];
+            st.b[k] = (d == 1) ? 0 : sb_acc;
+            sb_acc *= d;
+        }
+    }
+    return st;
 }
 
 template <Numeric T>
@@ -30,6 +96,28 @@ __global__ void add_kernel(TensorView<const T> a, TensorView<const T> b, TensorV
         out.data[i] = a.data[i] + b.data[i];
 }
 
+template <Numeric T, typename Idx>
+__global__ void add_broadcast_kernel(TensorView<const T> a, TensorView<const T> b,
+                                     TensorView<T> out, BroadcastStrides st)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= out.size())
+        return;
+
+    Idx rem = static_cast<Idx>(i);
+    size_t ia = 0, ib = 0;
+    for (size_t k = out.shape.ndim; k-- > 1;) {
+        const Idx dim   = static_cast<Idx>(out.shape[k]);
+        const Idx coord = rem % dim;
+        rem /= dim;
+        ia += static_cast<size_t>(coord) * st.a[k];
+        ib += static_cast<size_t>(coord) * st.b[k];
+    }
+    ia += static_cast<size_t>(rem) * st.a[0];
+    ib += static_cast<size_t>(rem) * st.b[0];
+    out.data[i] = a.data[ia] + b.data[ib];
+}
+
 template <Numeric T>
 __global__ void sub_kernel(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
 {
@@ -38,27 +126,26 @@ __global__ void sub_kernel(TensorView<const T> a, TensorView<const T> b, TensorV
         out.data[i] = a.data[i] - b.data[i];
 }
 
-template <Numeric T>
-__global__ void matmul_kernel(TensorView<const T> a, TensorView<const T> b, TensorView<T> out,
-                              size_t batch_count, size_t M, size_t K, size_t N)
+template <Numeric T, typename Idx>
+__global__ void sub_broadcast_kernel(TensorView<const T> a, TensorView<const T> b,
+                                     TensorView<T> out, BroadcastStrides st)
 {
-    const size_t col = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t row = static_cast<size_t>(blockIdx.y) * blockDim.y + threadIdx.y;
-
-    if (row >= M || col >= N)
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= out.size())
         return;
 
-    for (size_t batch = blockIdx.z; batch < batch_count; batch += gridDim.z) {
-        const T* A = a.data   + batch * M * K;
-        const T* B = b.data   + batch * K * N;
-        T*       C = out.data + batch * M * N;
-
-        T acc = T{0};
-        for (size_t k = 0; k < K; ++k)
-            acc += A[row * K + k] * B[k * N + col];
-
-        C[row * N + col] += acc; // += to match matmul_into semantics
+    Idx rem = static_cast<Idx>(i);
+    size_t ia = 0, ib = 0;
+    for (size_t k = out.shape.ndim; k-- > 1;) {
+        const Idx dim   = static_cast<Idx>(out.shape[k]);
+        const Idx coord = rem % dim;
+        rem /= dim;
+        ia += static_cast<size_t>(coord) * st.a[k];
+        ib += static_cast<size_t>(coord) * st.b[k];
     }
+    ia += static_cast<size_t>(rem) * st.a[0];
+    ib += static_cast<size_t>(rem) * st.b[0];
+    out.data[i] = a.data[ia] - b.data[ib];
 }
 
 template <Numeric T>
@@ -277,7 +364,7 @@ __global__ void conv2d_backward_input_kernel(TensorView<const T> dY, TensorView<
 
 template <Numeric T>
 __global__ void cross_entropy_forward_kernel(TensorView<const T> pred, TensorView<const T> target,
-                                             TensorView<T> probs, T* losses)
+                                             TensorView<T> probs, TensorView<T> losses)
 {
     const size_t n = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const size_t N = pred.shape[0];
@@ -302,10 +389,11 @@ __global__ void cross_entropy_forward_kernel(TensorView<const T> pred, TensorVie
         sample_loss    -= target(n, i) * shifted;
         log_arg        += e;
     }
+
     for (size_t i = 0; i < L; ++i)
         probs(n, i) /= log_arg;
 
-    losses[n] = sample_loss + log(log_arg);
+    losses(n) = sample_loss + log(log_arg);
 }
 
 template <Numeric T>
@@ -317,13 +405,48 @@ __global__ void cross_entropy_backward_kernel(TensorView<const T> probs, TensorV
         out.data[i] = inv_N * (probs.data[i] - target.data[i]);
 }
 
-struct CudaDeleter {
-    void operator()(void* p) const { if (p) cudaFree(p); }
-};
+template <ReduceOp op, Numeric T>
+__global__ void reduce_kernel(TensorView<const T> x, size_t axis_len, size_t inner_stride, TensorView<T> out)
+{
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid >= out.size())
+        return;
+
+    const size_t i = tid / inner_stride;
+    const size_t j = tid % inner_stride;
+
+    T acc = T{0};
+    for (size_t k = 0; k < axis_len; ++k)
+        acc += x.data[(i * axis_len + k) * inner_stride + j];
+
+    if constexpr (op == ReduceOp::SUM)
+        out.data[tid] += acc;
+    else if constexpr (op == ReduceOp::SUB)
+        out.data[tid] -= acc;
+}
+
+template <Numeric T>
+__global__ void gather_kernel(TensorView<const T> src, TensorView<const size_t> indices,
+                              TensorView<T> out, size_t stride)
+{
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid >= out.size())
+        return;
+
+    const size_t b   = tid / stride;
+    const size_t rem = tid % stride;
+    out.data[tid]    = src.data[indices.data[b] * stride + rem];
+}
 
 } // namespace
 
 namespace cuda_ops {
+
+void init_mem_pool()
+{
+    static CudaMemPoolConfig instance;
+    (void)instance;
+}
 
 template <Numeric T>
 void fill(TensorView<T> dst, T value)
@@ -340,35 +463,54 @@ void fill(TensorView<T> dst, T value)
 template <Numeric T>
 void add(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
 {
-    if (!(a.shape == b.shape) || !(b.shape == out.shape))
+    const bool same = (a.shape == b.shape) && (b.shape == out.shape);
+    if (!same && !(a.shape.broadcast_to(b.shape) == out.shape))
         throw std::invalid_argument("cuda_ops::add: invalid input shapes");
 
-    const size_t n = a.size();
+    const size_t n = out.size();
     if (n == 0)
         return;
 
     const u32 grid = static_cast<u32>(ROUND_UP(n, BLOCK));
-    add_kernel<<<grid, static_cast<u32>(BLOCK)>>>(a, b, out);
+    if (same) {
+        add_kernel<<<grid, static_cast<u32>(BLOCK)>>>(a, b, out);
+    } else {
+        const BroadcastStrides st = make_broadcast_strides(a.shape, b.shape, out.shape);
+        if (n <= std::numeric_limits<u32>::max())
+            add_broadcast_kernel<T, u32><<<grid, static_cast<u32>(BLOCK)>>>(a, b, out, st);
+        else
+            add_broadcast_kernel<T, size_t><<<grid, static_cast<u32>(BLOCK)>>>(a, b, out, st);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <Numeric T>
 void sub(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
 {
-    if (!(a.shape == b.shape) || !(b.shape == out.shape))
+    const bool same = (a.shape == b.shape) && (b.shape == out.shape);
+    if (!same && !(a.shape.broadcast_to(b.shape) == out.shape))
         throw std::invalid_argument("cuda_ops::sub: invalid input shapes");
 
-    const size_t n = a.size();
+    const size_t n = out.size();
     if (n == 0)
         return;
 
     const u32 grid = static_cast<u32>(ROUND_UP(n, BLOCK));
-    sub_kernel<<<grid, static_cast<u32>(BLOCK)>>>(a, b, out);
+    if (same) {
+        sub_kernel<<<grid, static_cast<u32>(BLOCK)>>>(a, b, out);
+    } else {
+        const BroadcastStrides st = make_broadcast_strides(a.shape, b.shape, out.shape);
+        if (n <= std::numeric_limits<u32>::max())
+            sub_broadcast_kernel<T, u32><<<grid, static_cast<u32>(BLOCK)>>>(a, b, out, st);
+        else
+            sub_broadcast_kernel<T, size_t><<<grid, static_cast<u32>(BLOCK)>>>(a, b, out, st);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <Numeric T>
-void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
+void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out,
+            bool trans_a, bool trans_b, bool accumulate)
 {
     const size_t ndim = a.shape.ndim;
     if (ndim < 2 || b.shape.ndim != ndim || out.shape.ndim != ndim)
@@ -381,11 +523,12 @@ void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
         batch *= a.shape[i];
     }
 
-    const size_t M = a.shape[ndim - 2];
-    const size_t K = a.shape[ndim - 1];
-    const size_t N = b.shape[ndim - 1];
+    const size_t M   = trans_a ? a.shape[ndim - 1] : a.shape[ndim - 2];
+    const size_t K   = trans_a ? a.shape[ndim - 2] : a.shape[ndim - 1];
+    const size_t K_b = trans_b ? b.shape[ndim - 1] : b.shape[ndim - 2];
+    const size_t N   = trans_b ? b.shape[ndim - 2] : b.shape[ndim - 1];
 
-    if (b.shape[ndim - 2] != K)
+    if (K_b != K)
         throw std::invalid_argument("cuda_ops::matmul: inner dimensions do not match");
     if (out.shape[ndim - 2] != M || out.shape[ndim - 1] != N)
         throw std::invalid_argument("cuda_ops::matmul: output matrix shape does not match {..., M, N}");
@@ -393,13 +536,60 @@ void matmul(TensorView<const T> a, TensorView<const T> b, TensorView<T> out)
     if (batch == 0 || M == 0 || K == 0 || N == 0)
         return;
 
-    dim3 block(static_cast<u32>(TILE), static_cast<u32>(TILE));
-    dim3 grid(static_cast<u32>(ROUND_UP(N, TILE)),
-              static_cast<u32>(ROUND_UP(M, TILE)),
-              static_cast<u32>(std::min(batch, MAX_GRID_Z)));
+    const cublasHandle_t    handle = get_cublas_handle();
+    const cublasOperation_t op_a   = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+    const cublasOperation_t op_b   = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;
 
-    matmul_kernel<<<grid, block>>>(a, b, out, batch, M, K, N);
-    CUDA_CHECK(cudaGetLastError());
+    const int m   = static_cast<int>(N);
+    const int n   = static_cast<int>(M);
+    const int k   = static_cast<int>(K);
+    const int lda = static_cast<int>(b.shape[ndim - 1]);
+    const int ldb = static_cast<int>(a.shape[ndim - 1]);
+    const int ldc = static_cast<int>(N);
+
+    const T alpha = T{1};
+    const T beta  = accumulate ? T{1} : T{0};
+
+    if constexpr (std::is_same_v<T, fp32>) {
+        if (batch > 1) {
+            CUBLAS_CHECK(cublasSgemmStridedBatched(
+                handle, op_a, op_b, m, n, k,
+                &alpha,
+                b.data, lda, static_cast<long long>(K * N),
+                a.data, ldb, static_cast<long long>(M * K),
+                &beta,
+                out.data, ldc, static_cast<long long>(M * N),
+                static_cast<int>(batch)));
+        } else {
+            CUBLAS_CHECK(cublasSgemm(
+                handle, op_a, op_b, m, n, k,
+                &alpha,
+                b.data, lda,
+                a.data, ldb,
+                &beta,
+                out.data, ldc));
+        }
+    }
+    else if constexpr (std::is_same_v<T, fp64>) {
+        if (batch > 1) {
+            CUBLAS_CHECK(cublasDgemmStridedBatched(
+                handle, op_a, op_b, m, n, k,
+                &alpha,
+                b.data, lda, static_cast<long long>(K * N),
+                a.data, ldb, static_cast<long long>(M * K),
+                &beta,
+                out.data, ldc, static_cast<long long>(M * N),
+                static_cast<int>(batch)));
+        } else {
+            CUBLAS_CHECK(cublasDgemm(
+                handle, op_a, op_b, m, n, k,
+                &alpha,
+                b.data, lda,
+                a.data, ldb,
+                &beta,
+                out.data, ldc));
+        }
+    }
 }
 
 template <Numeric T>
@@ -584,30 +774,19 @@ void conv2d_backward(TensorView<const T> input, TensorView<const T> filters, Ten
 }
 
 template <Numeric T>
-T cross_entropy_forward(TensorView<const T> pred, TensorView<const T> target, TensorView<T> probs)
+void cross_entropy_forward(TensorView<const T> pred, TensorView<const T> target, TensorView<T> probs, TensorView<T> loss)
 {
     if (pred.shape.ndim != 2 || !(pred.shape == target.shape) || !(pred.shape == probs.shape) ||
         pred.shape[0] == 0 || pred.shape[1] == 0)
         throw std::invalid_argument("cuda_ops::cross_entropy_forward: expected matching non-empty 2D tensors");
+    if (loss.shape.ndim != 1 || loss.shape[0] != pred.shape[0])
+        throw std::invalid_argument("cuda_ops::cross_entropy_forward: loss shape must be {N}");
 
     const size_t N = pred.shape[0];
 
-    T* raw_losses = nullptr;
-    CUDA_CHECK(cudaMalloc(&raw_losses, N * sizeof(T)));
-    std::unique_ptr<T, CudaDeleter> d_losses(raw_losses);
-
     const u32 grid = static_cast<u32>(ROUND_UP(N, BLOCK));
-    cross_entropy_forward_kernel<<<grid, static_cast<u32>(BLOCK)>>>(pred, target, probs, d_losses.get());
+    cross_entropy_forward_kernel<<<grid, static_cast<u32>(BLOCK)>>>(pred, target, probs, loss);
     CUDA_CHECK(cudaGetLastError());
-
-    std::vector<T> h_losses(N);
-    CUDA_CHECK(cudaMemcpy(h_losses.data(), d_losses.get(), N * sizeof(T), cudaMemcpyDeviceToHost));
-
-    T total = T{0};
-    for (T v : h_losses)
-        total += v;
-
-    return total / static_cast<T>(N);
 }
 
 template <Numeric T>
@@ -626,11 +805,61 @@ void cross_entropy_backward(TensorView<const T> probs, TensorView<const T> targe
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <ReduceOp op, Numeric T>
+void reduce(TensorView<const T> x, size_t axis, TensorView<T> out)
+{
+    if (axis >= x.shape.ndim)
+        throw std::invalid_argument("cuda_ops::reduce: invalid axis");
+
+    size_t outer_stride = 1;
+    size_t inner_stride = 1;
+    for (size_t i = 0; i < axis; ++i)
+        outer_stride *= x.shape[i];
+    for (size_t i = axis + 1; i < x.shape.ndim; ++i)
+        inner_stride *= x.shape[i];
+
+    if (out.size() != outer_stride * inner_stride)
+        throw std::invalid_argument("cuda_ops::reduce: invalid output shape");
+
+    const size_t axis_len = x.shape[axis];
+    const size_t n        = out.size();
+    if (n == 0 || axis_len == 0)
+        return;
+
+    const u32 grid = static_cast<u32>(ROUND_UP(n, BLOCK));
+    reduce_kernel<op><<<grid, static_cast<u32>(BLOCK)>>>(x, axis_len, inner_stride, out);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <Numeric T>
+void gather(TensorView<const T> src, TensorView<const size_t> indices, TensorView<T> out)
+{
+    if (src.shape.ndim == 0 || indices.shape.ndim != 1 || out.shape.ndim != src.shape.ndim)
+        throw std::invalid_argument("cuda_ops::gather: invalid tensor ranks");
+    if (out.shape[0] != indices.shape[0])
+        throw std::invalid_argument("cuda_ops::gather: output batch size must match indices length");
+    for (size_t i = 1; i < src.shape.ndim; ++i) {
+        if (out.shape[i] != src.shape[i])
+            throw std::invalid_argument("cuda_ops::gather: trailing dimensions of src and out do not match");
+    }
+
+    const size_t n = out.size();
+    if (n == 0)
+        return;
+    if (src.shape[0] == 0)
+        throw std::invalid_argument("cuda_ops::gather: cannot gather from an empty src tensor");
+
+    const size_t stride = src.size() / src.shape[0];
+    const u32 grid      = static_cast<u32>(ROUND_UP(n, BLOCK));
+    gather_kernel<<<grid, static_cast<u32>(BLOCK)>>>(src, indices, out, stride);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 #define INSTANTIATE_FLOAT_OPS(T)                                                                    \
     template void fill<T>(TensorView<T>, T);                                                        \
     template void add<T>(TensorView<const T>, TensorView<const T>, TensorView<T>);                  \
     template void sub<T>(TensorView<const T>, TensorView<const T>, TensorView<T>);                  \
-    template void matmul<T>(TensorView<const T>, TensorView<const T>, TensorView<T>);               \
+    template void matmul<T>(TensorView<const T>, TensorView<const T>, TensorView<T>, bool, bool, bool); \
     template void transpose<T>(TensorView<const T>, TensorView<T>);                                 \
     template void sgd_step<T>(TensorView<T>, TensorView<const T>, T);                               \
     template void relu_forward<T>(TensorView<const T>, TensorView<T>);                              \
@@ -640,8 +869,11 @@ void cross_entropy_backward(TensorView<const T> probs, TensorView<const T> targe
     template void conv2d_forward<T>(TensorView<const T>, TensorView<const T>, TensorView<const T>, TensorView<T>); \
     template void conv2d_backward<T>(TensorView<const T>, TensorView<const T>, TensorView<const T>, \
                                      TensorView<T>, TensorView<T>, TensorView<T>);                  \
-    template T    cross_entropy_forward<T>(TensorView<const T>, TensorView<const T>, TensorView<T>); \
-    template void cross_entropy_backward<T>(TensorView<const T>, TensorView<const T>, TensorView<T>);
+    template void cross_entropy_forward<T>(TensorView<const T>, TensorView<const T>, TensorView<T>, TensorView<T>); \
+    template void cross_entropy_backward<T>(TensorView<const T>, TensorView<const T>, TensorView<T>); \
+    template void reduce<ReduceOp::SUM, T>(TensorView<const T>, size_t, TensorView<T>);             \
+    template void reduce<ReduceOp::SUB, T>(TensorView<const T>, size_t, TensorView<T>);             \
+    template void gather<T>(TensorView<const T>, TensorView<const size_t>, TensorView<T>);
 
 INSTANTIATE_FLOAT_OPS(fp32)
 INSTANTIATE_FLOAT_OPS(fp64)

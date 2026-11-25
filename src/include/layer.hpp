@@ -454,13 +454,9 @@ struct DenseLayer : Layer<T> {
                                         "}, got " + in_shape.str());
 
         input = x;
-        const size_t N = in_shape[0];
 
         auto y = matmul(x, weights);
-        for (size_t n = 0; n < N; n++) {
-            auto y_n = y.slice(n);
-            add_into(y_n, bias, y_n);
-        }
+        add_into(y, bias, y);
 
         return y;
     }
@@ -478,12 +474,11 @@ struct DenseLayer : Layer<T> {
             throw std::invalid_argument("DenseLayer::backward: expected gradient shape " + expected.str() +
                                         ", got " + dY.shape().str());
 
-        Tensor<T> dX = Tensor<T>::zeros(input.device(), input.shape());
+        Tensor<T> dX(input.device(), input.shape());
 
-        matmul_into(transpose(input), dY, weights_grad);
-        for (size_t n = 0; n < N; n++)
-            add_into(bias_grad, dY.slice(n), bias_grad);
-        matmul_into(dY, transpose(weights), dX);
+        matmul_into(input, dY, weights_grad, true, false);
+        reduce_into(dY, 0, bias_grad);
+        matmul_into(dY, weights, dX, false, true, /*accumulate=*/false);
 
         return dX;
     }
