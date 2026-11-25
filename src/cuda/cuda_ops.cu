@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include <cublas_v2.h>
+#include <cudnn.h>
 
 #define ROUND_UP(n, BLOCK) (((n) + (BLOCK) - 1) / (BLOCK))
 
@@ -19,6 +22,16 @@
             throw std::runtime_error("cuBLAS error: code " +                    \
                                      std::to_string(static_cast<int>(status_)) +\
                                      " at " + __FILE__ + ":" +                  \
+                                     std::to_string(__LINE__));                 \
+    } while (0)
+
+#define CUDNN_CHECK(call)                                                       \
+    do {                                                                        \
+        cudnnStatus_t status_ = (call);                                         \
+        if (status_ != CUDNN_STATUS_SUCCESS)                                    \
+            throw std::runtime_error(std::string("cuDNN error: ") +             \
+                                     cudnnGetErrorString(status_) + " at " +    \
+                                     __FILE__ + ":" +                           \
                                      std::to_string(__LINE__));                 \
     } while (0)
 
@@ -55,6 +68,198 @@ struct CudaMemPoolConfig {
     CudaMemPoolConfig(const CudaMemPoolConfig&)            = delete;
     CudaMemPoolConfig& operator=(const CudaMemPoolConfig&) = delete;
 };
+
+struct CUDNNHandle {
+    cudnnHandle_t handle = nullptr;
+    CUDNNHandle()  { CUDNN_CHECK(cudnnCreate(&handle)); }
+    ~CUDNNHandle() { if (handle) cudnnDestroy(handle); }
+    CUDNNHandle(const CUDNNHandle&)            = delete;
+    CUDNNHandle& operator=(const CUDNNHandle&) = delete;
+};
+
+inline cudnnHandle_t get_cudnn_handle()
+{
+    static CUDNNHandle instance;
+    return instance.handle;
+}
+
+struct CUDNNWorkspace {
+    void*  ptr   = nullptr;
+    size_t bytes = 0;
+
+    void* ensure(size_t needed)
+    {
+        if (needed == 0)
+            return nullptr;
+        if (needed > bytes) {
+            if (ptr)
+                cudaFreeAsync(ptr, 0);
+            ptr   = nullptr;
+            bytes = 0;
+            CUDA_CHECK(cudaMallocAsync(&ptr, needed, 0));
+            bytes = needed;
+        }
+        return ptr;
+    }
+
+    CUDNNWorkspace() = default;
+    ~CUDNNWorkspace() { if (ptr) cudaFreeAsync(ptr, 0); }
+    CUDNNWorkspace(const CUDNNWorkspace&)            = delete;
+    CUDNNWorkspace& operator=(const CUDNNWorkspace&) = delete;
+};
+
+inline void* get_cudnn_workspace(size_t needed)
+{
+    static CUDNNWorkspace ws;
+    return ws.ensure(needed);
+}
+
+struct TensorDesc {
+    cudnnTensorDescriptor_t desc = nullptr;
+    TensorDesc()  { CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc)); }
+    ~TensorDesc() { if (desc) cudnnDestroyTensorDescriptor(desc); }
+    TensorDesc(const TensorDesc&)            = delete;
+    TensorDesc& operator=(const TensorDesc&) = delete;
+    operator cudnnTensorDescriptor_t() const { return desc; }
+};
+
+struct FilterDesc {
+    cudnnFilterDescriptor_t desc = nullptr;
+    FilterDesc()  { CUDNN_CHECK(cudnnCreateFilterDescriptor(&desc)); }
+    ~FilterDesc() { if (desc) cudnnDestroyFilterDescriptor(desc); }
+    FilterDesc(const FilterDesc&)            = delete;
+    FilterDesc& operator=(const FilterDesc&) = delete;
+    operator cudnnFilterDescriptor_t() const { return desc; }
+};
+
+struct ConvDesc {
+    cudnnConvolutionDescriptor_t desc = nullptr;
+    ConvDesc()  { CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&desc)); }
+    ~ConvDesc() { if (desc) cudnnDestroyConvolutionDescriptor(desc); }
+    ConvDesc(const ConvDesc&)            = delete;
+    ConvDesc& operator=(const ConvDesc&) = delete;
+    operator cudnnConvolutionDescriptor_t() const { return desc; }
+};
+
+template <Numeric T>
+constexpr cudnnDataType_t cudnn_dtype()
+{
+    if constexpr (std::is_same_v<T, fp32>)      return CUDNN_DATA_FLOAT;
+    else if constexpr (std::is_same_v<T, fp64>) return CUDNN_DATA_DOUBLE;
+    else static_assert(!sizeof(T*), "cuDNN conv2d only supports fp32 and fp64");
+}
+
+struct ConvKey {
+    cudnnDataType_t dtype;
+    int N, I, H, W, O, K;
+    bool operator==(const ConvKey&) const = default;
+};
+
+struct ConvKeyHash {
+    size_t operator()(const ConvKey& k) const noexcept
+    {
+        size_t h = static_cast<size_t>(k.dtype);
+        auto mix = [&](int v) {
+            h ^= std::hash<int>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+        mix(k.N); mix(k.I); mix(k.H); mix(k.W); mix(k.O); mix(k.K);
+        return h;
+    }
+};
+
+struct ConvFwdPlan {
+    cudnnConvolutionFwdAlgo_t algo;
+    size_t ws_bytes;
+};
+
+struct ConvBwdPlan {
+    cudnnConvolutionBwdFilterAlgo_t filter_algo;
+    size_t filter_ws;
+    cudnnConvolutionBwdDataAlgo_t data_algo;
+    size_t data_ws;
+};
+
+inline ConvFwdPlan get_conv_fwd_plan(cudnnHandle_t handle, const ConvKey& key,
+                                     cudnnTensorDescriptor_t x_desc, cudnnFilterDescriptor_t w_desc,
+                                     cudnnConvolutionDescriptor_t conv_desc, cudnnTensorDescriptor_t y_desc)
+{
+    static std::unordered_map<ConvKey, ConvFwdPlan, ConvKeyHash> cache;
+    if (auto it = cache.find(key); it != cache.end())
+        return it->second;
+
+    constexpr int kMaxAlgos = 8;
+    cudnnConvolutionFwdAlgoPerf_t perf[kMaxAlgos];
+    int returned = 0;
+    CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+        handle, x_desc, w_desc, conv_desc, y_desc, kMaxAlgos, &returned, perf));
+
+    for (int i = 0; i < returned; ++i) {
+        if (perf[i].status == CUDNN_STATUS_SUCCESS) {
+            size_t ws_bytes = 0;
+            CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                handle, x_desc, w_desc, conv_desc, y_desc, perf[i].algo, &ws_bytes));
+            ConvFwdPlan plan{perf[i].algo, ws_bytes};
+            cache.emplace(key, plan);
+            return plan;
+        }
+    }
+    throw std::runtime_error("cuDNN: no valid convolution forward algorithm found");
+}
+
+inline ConvBwdPlan get_conv_bwd_plan(cudnnHandle_t handle, const ConvKey& key,
+                                     cudnnTensorDescriptor_t x_desc, cudnnFilterDescriptor_t w_desc,
+                                     cudnnConvolutionDescriptor_t conv_desc, cudnnTensorDescriptor_t dy_desc)
+{
+    static std::unordered_map<ConvKey, ConvBwdPlan, ConvKeyHash> cache;
+    if (auto it = cache.find(key); it != cache.end())
+        return it->second;
+
+    constexpr int kMaxAlgos = 8;
+
+    cudnnConvolutionBwdFilterAlgoPerf_t f_perf[kMaxAlgos];
+    int f_returned = 0;
+    CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+        handle, x_desc, dy_desc, conv_desc, w_desc, kMaxAlgos, &f_returned, f_perf));
+
+    cudnnConvolutionBwdFilterAlgo_t filter_algo{};
+    size_t filter_ws = 0;
+    bool found_filter = false;
+    for (int i = 0; i < f_returned; ++i) {
+        if (f_perf[i].status == CUDNN_STATUS_SUCCESS) {
+            filter_algo = f_perf[i].algo;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle, x_desc, dy_desc, conv_desc, w_desc, filter_algo, &filter_ws));
+            found_filter = true;
+            break;
+        }
+    }
+    if (!found_filter)
+        throw std::runtime_error("cuDNN: no valid convolution backward-filter algorithm found");
+
+    cudnnConvolutionBwdDataAlgoPerf_t d_perf[kMaxAlgos];
+    int d_returned = 0;
+    CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+        handle, w_desc, dy_desc, conv_desc, x_desc, kMaxAlgos, &d_returned, d_perf));
+
+    cudnnConvolutionBwdDataAlgo_t data_algo{};
+    size_t data_ws = 0;
+    bool found_data = false;
+    for (int i = 0; i < d_returned; ++i) {
+        if (d_perf[i].status == CUDNN_STATUS_SUCCESS) {
+            data_algo = d_perf[i].algo;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+                handle, w_desc, dy_desc, conv_desc, x_desc, data_algo, &data_ws));
+            found_data = true;
+            break;
+        }
+    }
+    if (!found_data)
+        throw std::runtime_error("cuDNN: no valid convolution backward-data algorithm found");
+
+    ConvBwdPlan plan{filter_algo, filter_ws, data_algo, data_ws};
+    cache.emplace(key, plan);
+    return plan;
+}
 
 template <Numeric T>
 __global__ void fill_kernel(TensorView<T> dst, T value)
@@ -238,128 +443,6 @@ __global__ void maxpool2d_backward_kernel(TensorView<const T> dY, TensorView<con
     const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < max_indices.size())
         dX.data[max_indices.data[i]] = dY.data[i];
-}
-
-template <Numeric T>
-__global__ void conv2d_forward_kernel(TensorView<const T> x, TensorView<const T> filters,
-                                      TensorView<const T> bias, TensorView<T> y)
-{
-    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (tid >= y.size())
-        return;
-
-    const size_t O    = filters.shape[0];
-    const size_t I    = filters.shape[1];
-    const size_t K    = filters.shape[2];
-    const size_t outH = y.shape[2];
-    const size_t outW = y.shape[3];
-
-    size_t tmp = tid;
-    const size_t j   = tmp % outW; tmp /= outW;
-    const size_t i   = tmp % outH; tmp /= outH;
-    const size_t out = tmp % O;    tmp /= O;
-    const size_t n   = tmp;
-
-    T acc = bias.data[out];
-    for (size_t c = 0; c < I; ++c) {
-        for (size_t u = 0; u < K; ++u) {
-            for (size_t v = 0; v < K; ++v) {
-                acc += filters(out, c, u, v) * x(n, c, i + u, j + v);
-            }
-        }
-    }
-    y.data[tid] = acc;
-}
-
-template <Numeric T>
-__global__ void conv2d_backward_filters_kernel(TensorView<const T> input, TensorView<const T> dY,
-                                               TensorView<T> filters_grad)
-{
-    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (tid >= filters_grad.size())
-        return;
-
-    const size_t N    = input.shape[0];
-    const size_t I    = filters_grad.shape[1];
-    const size_t K    = filters_grad.shape[2];
-    const size_t outH = dY.shape[2];
-    const size_t outW = dY.shape[3];
-
-    size_t tmp = tid;
-    const size_t j   = tmp % K; tmp /= K;
-    const size_t i   = tmp % K; tmp /= K;
-    const size_t in  = tmp % I; tmp /= I;
-    const size_t out = tmp;
-
-    T acc = T{0};
-    for (size_t n = 0; n < N; ++n) {
-        for (size_t u = 0; u < outH; ++u) {
-            for (size_t v = 0; v < outW; ++v) {
-                acc += dY(n, out, u, v) * input(n, in, i + u, j + v);
-            }
-        }
-    }
-    filters_grad.data[tid] += acc;
-}
-
-template <Numeric T>
-__global__ void conv2d_backward_bias_kernel(TensorView<const T> dY, TensorView<T> bias_grad)
-{
-    const size_t out = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (out >= bias_grad.size())
-        return;
-
-    const size_t N    = dY.shape[0];
-    const size_t outH = dY.shape[2];
-    const size_t outW = dY.shape[3];
-
-    T acc = T{0};
-    for (size_t n = 0; n < N; ++n) {
-        for (size_t u = 0; u < outH; ++u) {
-            for (size_t v = 0; v < outW; ++v) {
-                acc += dY(n, out, u, v);
-            }
-        }
-    }
-    bias_grad.data[out] += acc;
-}
-
-template <Numeric T>
-__global__ void conv2d_backward_input_kernel(TensorView<const T> dY, TensorView<const T> filters,
-                                             TensorView<T> dX)
-{
-    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (tid >= dX.size())
-        return;
-
-    const size_t O    = filters.shape[0];
-    const size_t I    = filters.shape[1];
-    const size_t K    = filters.shape[2];
-    const size_t H    = dX.shape[2];
-    const size_t W    = dX.shape[3];
-    const size_t outH = dY.shape[2];
-    const size_t outW = dY.shape[3];
-
-    size_t tmp = tid;
-    const size_t j  = tmp % W; tmp /= W;
-    const size_t i  = tmp % H; tmp /= H;
-    const size_t in = tmp % I; tmp /= I;
-    const size_t n  = tmp;
-
-    const size_t u_begin = i >= K ? i - K + 1 : 0;
-    const size_t u_end   = (i + 1 < outH) ? (i + 1) : outH;
-    const size_t v_begin = j >= K ? j - K + 1 : 0;
-    const size_t v_end   = (j + 1 < outW) ? (j + 1) : outW;
-
-    T acc = T{0};
-    for (size_t out = 0; out < O; ++out) {
-        for (size_t u = u_begin; u < u_end; ++u) {
-            for (size_t v = v_begin; v < v_end; ++v) {
-                acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
-            }
-        }
-    }
-    dX.data[tid] = acc;
 }
 
 template <Numeric T>
@@ -719,17 +802,47 @@ void conv2d_forward(TensorView<const T> x, TensorView<const T> filters, TensorVi
     if (filters.shape[1] != I || filters.shape[3] != K || bias.shape[0] != O || K == 0 || H < K || W < K)
         throw std::invalid_argument("cuda_ops::conv2d_forward: incompatible filter/bias/input shapes");
 
-    const Shape expected{N, O, H - K + 1, W - K + 1};
+    const size_t outH = H - K + 1;
+    const size_t outW = W - K + 1;
+    const Shape expected{N, O, outH, outW};
     if (!(y.shape == expected))
         throw std::invalid_argument("cuda_ops::conv2d_forward: output shape mismatch");
 
-    const size_t n = y.size();
-    if (n == 0)
+    if (y.size() == 0)
         return;
 
-    const u32 grid = static_cast<u32>(ROUND_UP(n, BLOCK));
-    conv2d_forward_kernel<<<grid, static_cast<u32>(BLOCK)>>>(x, filters, bias, y);
-    CUDA_CHECK(cudaGetLastError());
+    const cudnnHandle_t   handle = get_cudnn_handle();
+    const cudnnDataType_t dtype  = cudnn_dtype<T>();
+
+    const int n_i = static_cast<int>(N), i_i = static_cast<int>(I);
+    const int h_i = static_cast<int>(H), w_i = static_cast<int>(W);
+    const int o_i = static_cast<int>(O), k_i = static_cast<int>(K);
+    const int oh_i = static_cast<int>(outH), ow_i = static_cast<int>(outW);
+
+    TensorDesc x_desc, y_desc, b_desc;
+    FilterDesc w_desc;
+    ConvDesc   conv_desc;
+
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(x_desc, CUDNN_TENSOR_NCHW, dtype, n_i, i_i, h_i, w_i));
+    CUDNN_CHECK(cudnnSetFilter4dDescriptor(w_desc, dtype, CUDNN_TENSOR_NCHW, o_i, i_i, k_i, k_i));
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(y_desc, CUDNN_TENSOR_NCHW, dtype, n_i, o_i, oh_i, ow_i));
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(b_desc, CUDNN_TENSOR_NCHW, dtype, 1, o_i, 1, 1));
+    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc, 0, 0, 1, 1, 1, 1, CUDNN_CROSS_CORRELATION, dtype));
+
+    const ConvKey     key{dtype, n_i, i_i, h_i, w_i, o_i, k_i};
+    const ConvFwdPlan plan = get_conv_fwd_plan(handle, key, x_desc, w_desc, conv_desc, y_desc);
+    void*             ws   = get_cudnn_workspace(plan.ws_bytes);
+
+    const T alpha     = T{1};
+    const T beta_zero = T{0};
+    const T beta_one  = T{1};
+
+    CUDNN_CHECK(cudnnConvolutionForward(
+        handle, &alpha, x_desc, x.data, w_desc, filters.data,
+        conv_desc, plan.algo, ws, plan.ws_bytes, &beta_zero, y_desc, y.data));
+
+    CUDNN_CHECK(cudnnAddTensor(
+        handle, &alpha, b_desc, bias.data, &beta_one, y_desc, y.data));
 }
 
 template <Numeric T>
@@ -749,28 +862,53 @@ void conv2d_backward(TensorView<const T> input, TensorView<const T> filters, Ten
 
     if (filters.shape[1] != I || filters.shape[3] != K || K == 0 || H < K || W < K)
         throw std::invalid_argument("cuda_ops::conv2d_backward: incompatible input/filter shapes");
-    if (!(dY.shape == Shape{N, O, H - K + 1, W - K + 1}))
+
+    const size_t outH = H - K + 1;
+    const size_t outW = W - K + 1;
+    if (!(dY.shape == Shape{N, O, outH, outW}))
         throw std::invalid_argument("cuda_ops::conv2d_backward: dY shape mismatch");
     if (!(filters_grad.shape == filters.shape) || bias_grad.shape[0] != O || !(dX.shape == input.shape))
         throw std::invalid_argument("cuda_ops::conv2d_backward: output gradient shape mismatch");
 
-    if (const size_t n_filters = filters_grad.size(); n_filters > 0) {
-        const u32 grid = static_cast<u32>(ROUND_UP(n_filters, BLOCK));
-        conv2d_backward_filters_kernel<<<grid, static_cast<u32>(BLOCK)>>>(input, dY, filters_grad);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    if (N == 0 || O == 0 || I == 0)
+        return;
 
-    if (const size_t n_bias = bias_grad.size(); n_bias > 0) {
-        const u32 grid = static_cast<u32>(ROUND_UP(n_bias, BLOCK));
-        conv2d_backward_bias_kernel<<<grid, static_cast<u32>(BLOCK)>>>(dY, bias_grad);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    const cudnnHandle_t   handle = get_cudnn_handle();
+    const cudnnDataType_t dtype  = cudnn_dtype<T>();
 
-    if (const size_t n_dx = dX.size(); n_dx > 0) {
-        const u32 grid = static_cast<u32>(ROUND_UP(n_dx, BLOCK));
-        conv2d_backward_input_kernel<<<grid, static_cast<u32>(BLOCK)>>>(dY, filters, dX);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    const int n_i = static_cast<int>(N), i_i = static_cast<int>(I);
+    const int h_i = static_cast<int>(H), w_i = static_cast<int>(W);
+    const int o_i = static_cast<int>(O), k_i = static_cast<int>(K);
+    const int oh_i = static_cast<int>(outH), ow_i = static_cast<int>(outW);
+
+    TensorDesc x_desc, dy_desc, b_desc;
+    FilterDesc w_desc;
+    ConvDesc   conv_desc;
+
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(x_desc,  CUDNN_TENSOR_NCHW, dtype, n_i, i_i, h_i, w_i));
+    CUDNN_CHECK(cudnnSetFilter4dDescriptor(w_desc,  dtype, CUDNN_TENSOR_NCHW, o_i, i_i, k_i, k_i));
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(dy_desc, CUDNN_TENSOR_NCHW, dtype, n_i, o_i, oh_i, ow_i));
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(b_desc,  CUDNN_TENSOR_NCHW, dtype, 1, o_i, 1, 1));
+    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc, 0, 0, 1, 1, 1, 1, CUDNN_CROSS_CORRELATION, dtype));
+
+    const ConvKey     key{dtype, n_i, i_i, h_i, w_i, o_i, k_i};
+    const ConvBwdPlan plan = get_conv_bwd_plan(handle, key, x_desc, w_desc, conv_desc, dy_desc);
+    void*             ws   = get_cudnn_workspace(std::max(plan.filter_ws, plan.data_ws));
+
+    const T alpha     = T{1};
+    const T beta_zero = T{0};
+    const T beta_one  = T{1};
+
+    CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+        handle, &alpha, x_desc, input.data, dy_desc, dY.data,
+        conv_desc, plan.filter_algo, ws, plan.filter_ws, &beta_one, w_desc, filters_grad.data));
+
+    CUDNN_CHECK(cudnnConvolutionBackwardBias(
+        handle, &alpha, dy_desc, dY.data, &beta_one, b_desc, bias_grad.data));
+
+    CUDNN_CHECK(cudnnConvolutionBackwardData(
+        handle, &alpha, w_desc, filters.data, dy_desc, dY.data,
+        conv_desc, plan.data_algo, ws, plan.data_ws, &beta_zero, x_desc, dX.data));
 }
 
 template <Numeric T>
