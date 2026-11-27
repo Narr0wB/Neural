@@ -90,20 +90,42 @@ struct ConvLayer : Layer<T> {
         Tensor<T> y(x.device(), N, O, outH, outW);
 
         if (x.device() == Device::CPU) {
+            const T* px = x.raw();
+            const T* pf = filters.raw();
+            const T* pb = bias.raw();
+            T*       py = y.raw();
+
+            const size_t x_n_stride = I * H * W;
+            const size_t x_c_stride = H * W;
+            const size_t y_n_stride = O * outH * outW;
+            const size_t y_o_stride = outH * outW;
+            const size_t f_o_stride = I * K * K;
+            const size_t f_c_stride = K * K;
+
             #pragma omp parallel for collapse(2)
-            for (size_t n = 0; n < N; n++) {
-                for (size_t out = 0; out < O; out++) {
-                    for (size_t i = 0; i < outH; i++) {
-                        for (size_t j = 0; j < outW; j++) {
-                            T acc = bias(out);
-                            for (size_t c = 0; c < I; c++) {
-                                for (size_t u = 0; u < K; u++) {
-                                    for (size_t v = 0; v < K; v++) {
-                                        acc += filters(out, c, u, v) * x(n, c, i + u, j + v);
-                                    }
+            for (size_t n = 0; n < N; ++n) {
+                for (size_t out = 0; out < O; ++out) {
+                    T*       y_plane = py + n * y_n_stride + out * y_o_stride;
+                    const T* x_n     = px + n * x_n_stride;
+                    const T* f_o     = pf + out * f_o_stride;
+                    const T  b_val   = pb[out];
+
+                    for (size_t i = 0; i < outH; ++i) {
+                        T* y_row = y_plane + i * outW;
+                        std::fill_n(y_row, outW, b_val);
+
+                        for (size_t c = 0; c < I; ++c) {
+                            const T* x_c = x_n + c * x_c_stride;
+                            const T* f_c = f_o + c * f_c_stride;
+                            for (size_t u = 0; u < K; ++u) {
+                                const T* x_base = x_c + (i + u) * W;
+                                for (size_t v = 0; v < K; ++v) {
+                                    const T  w     = f_c[u * K + v];
+                                    const T* x_row = x_base + v;
+                                    for (size_t j = 0; j < outW; ++j)
+                                        y_row[j] += w * x_row[j];
                                 }
                             }
-                            y(n, out, i, j) = acc;
                         }
                     }
                 }
@@ -144,57 +166,74 @@ struct ConvLayer : Layer<T> {
         Tensor<T> dX(dY.device(), N, I, H, W);
 
         if (dY.device() == Device::CPU) {
-            #pragma omp parallel for collapse(2)
-            for (size_t out = 0; out < O; out++) {
-                for (size_t in = 0; in < I; in++) {
-                    for (size_t i = 0; i < K; i++) {
-                        for (size_t j = 0; j < K; j++) {
-                            T acc = T{0};
-                            for (size_t k = 0; k < N; k++) {
-                                for (size_t u = 0; u < outH; u++) {
-                                    for (size_t v = 0; v < outW; v++) {
-                                        acc += dY(k, out, u, v) * input(k, in, i + u, j + v);
-                                    }
-                                }
-                            }
-                            filters_grad(out, in, i, j) += acc;
-                        }
-                    }
-                }
-            }
+            const T* px  = input.raw();
+            const T* pf  = filters.raw();
+            const T* pdy = dY.raw();
+            T*       pfg = filters_grad.raw();
+            T*       pbg = bias_grad.raw();
+            T*       pdx = dX.raw();
 
-            for (size_t out = 0; out < O; out++) {
-                T acc = T{0};
-                for (size_t k = 0; k < N; k++) {
-                    for (size_t u = 0; u < outH; u++) {
-                        for (size_t v = 0; v < outW; v++) {
-                            acc += dY(k, out, u, v);
-                        }
-                    }
-                }
-
-                bias_grad(out) += acc;
-            }
+            const size_t x_n_stride  = I * H * W;
+            const size_t x_c_stride  = H * W;
+            const size_t dy_n_stride = O * outH * outW;
+            const size_t dy_o_stride = outH * outW;
+            const size_t f_o_stride  = I * K * K;
+            const size_t f_c_stride  = K * K;
 
             #pragma omp parallel for collapse(4)
-            for (size_t n = 0; n < N; n++) {
-                for (size_t in = 0; in < I; in++) {
-                    for (size_t i = 0; i < H; i++) {
-                        for (size_t j = 0; j < W; j++) {
+            for (size_t out = 0; out < O; ++out) {
+                for (size_t in = 0; in < I; ++in) {
+                    for (size_t i = 0; i < K; ++i) {
+                        for (size_t j = 0; j < K; ++j) {
                             T acc = T{0};
-                            for (size_t out = 0; out < O; out++) {
-                                const size_t u_begin = i >= K ? i - K + 1 : 0;
-                                const size_t u_end   = std::min(i + 1, outH);
-                                const size_t v_begin = j >= K ? j - K + 1 : 0;
-                                const size_t v_end   = std::min(j + 1, outW);
-
-                                for (size_t u = u_begin; u < u_end; u++) {
-                                    for (size_t v = v_begin; v < v_end; v++) {
-                                        acc += dY(n, out, u, v) * filters(out, in, i - u, j - v);
-                                    }
+                            for (size_t n = 0; n < N; ++n) {
+                                const T* dy_plane = pdy + n * dy_n_stride + out * dy_o_stride;
+                                const T* x_plane  = px  + n * x_n_stride  + in  * x_c_stride;
+                                for (size_t u = 0; u < outH; ++u) {
+                                    const T* dy_row = dy_plane + u * outW;
+                                    const T* x_row  = x_plane  + (i + u) * W + j;
+                                    for (size_t v = 0; v < outW; ++v)
+                                        acc += dy_row[v] * x_row[v];
                                 }
                             }
-                            dX(n, in, i, j) = acc;
+                            pfg[out * f_o_stride + in * f_c_stride + i * K + j] += acc;
+                        }
+                    }
+                }
+            }
+
+            #pragma omp parallel for
+            for (size_t out = 0; out < O; ++out) {
+                T acc = T{0};
+                for (size_t n = 0; n < N; ++n) {
+                    const T* dy_plane = pdy + n * dy_n_stride + out * dy_o_stride;
+                    for (size_t idx = 0; idx < dy_o_stride; ++idx)
+                        acc += dy_plane[idx];
+                }
+                pbg[out] += acc;
+            }
+
+            #pragma omp parallel for collapse(2)
+            for (size_t n = 0; n < N; ++n) {
+                for (size_t in = 0; in < I; ++in) {
+                    T* dx_plane = pdx + n * x_n_stride + in * x_c_stride;
+                    std::fill_n(dx_plane, x_c_stride, T{0});
+
+                    for (size_t out = 0; out < O; ++out) {
+                        const T* dy_plane = pdy + n * dy_n_stride + out * dy_o_stride;
+                        const T* f_oc     = pf  + out * f_o_stride + in * f_c_stride;
+
+                        for (size_t u = 0; u < outH; ++u) {
+                            const T* dy_row = dy_plane + u * outW;
+                            for (size_t kh = 0; kh < K; ++kh) {
+                                T* dx_base = dx_plane + (u + kh) * W;
+                                for (size_t kw = 0; kw < K; ++kw) {
+                                    const T w      = f_oc[kh * K + kw];
+                                    T*      dx_row = dx_base + kw;
+                                    for (size_t v = 0; v < outW; ++v)
+                                        dx_row[v] += w * dy_row[v];
+                                }
+                            }
                         }
                     }
                 }

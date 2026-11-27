@@ -1,121 +1,96 @@
+# NNeural
 
-# Neural
-GPU-Accelerated (NVIDIA gpus only) simple ANN made for the mnist dataset (handwritten digits)
+A small C++20 library for building and training convolutional neural networks (CNNs), with OpenMP CPU parallelization and optional NVIDIA CUDA/cuDNN GPU acceleration.
 
-## Setting up
-To build and test out this project you will need to follow a couple of steps:
-- First, make sure you have installed the following essential tools:
+## Features
+
+- **Tensors**: N-dimensional `Tensor<T>` with seamless `Device::CPU` / `Device::CUDA` transfers via `.to(...)`.
+- **Sequential Model**: `Model<T>` container (`add`, `to`, `forward`, `backward`, `params`).
+- **Layers**: `ConvLayer`, `MaxPoolLayer`, `ReLULayer`, `FlattenLayer`, `DenseLayer`.
+- **Loss & Optimization**: `CrossEntropyLoss` and `SGDOptimizer`.
+- **Datasets**: Batching helpers (`shuffled_indices`, `gather_batch`) and an MNIST CSV loader (`load_mnist_csv`).
+
+## Requirements
+
+- CMake ≥ 3.20
+- C++20-compatible compiler
+- OpenMP *(optional — automatically detected for multi-threaded CPU execution)*
+- [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) & cuDNN *(optional — only needed when enabling CUDA)*
+
+## Building
+
+### CPU (default)
+
 ```bash
->$ make
->$ g++
+cmake -B build
+cmake --build build
 ```
-- Unzip the mnist_test.zip file datasets present in the ```datasets/``` directory 
 
-- In order to train/use the neural network using the GPU you will need to install the [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
+### With CUDA GPU Acceleration
 
-
-## Build
-Once you have installed the required tools and set up the environment you are ready to build the project. Just navigate to the build directory and run the Makefile:
 ```bash
->$ cd build/
->$ make __CUDA=1 # or set to 0 to disable GPU
+cmake -B build -DUSE_CUDA=ON
+cmake --build build
 ```
 
-## Usage
+If cuDNN is installed in a non-standard location, pass `-DCUDNN_PATH=/path/to/cudnn` (or set `CUDNN_INCLUDE_DIR` and `CUDNN_LIBRARY`).
 
-Load the train and test datasets by using the function `ImageList csv_to_image(const char* path, int n_of_imgs)`,
-then create a SimpleNeuralNetwork object and use one of the two constructors, the train constructor:
+This builds the reusable static library `nneural_core` and the example MNIST training binary `build/nneural`.
 
-```cpp
-SimpleNeuralNetwork(std::vector<Image> data_set, size_t epochs, double learn_rate, bool verbose = false, size_t batch_size = 100
-```
+## Example Usage
 
-Or the pre-trained module constructor:
-
-```cpp
-SimpleNeuralNetwork(const char* path)
-```
-(Pretrained modules are available in the ```pre-trained/``` directory)
-##
-After having loaded the datasets and created the NN all that's left is to test it!
-You can either test the model accuracy over a specific dataset:
-
-```cpp
-SimpleNeuralNetwork snn("../pretrained/model20e60k0p28.nn");
-std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000);
-
-printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
-```
-
-Or you can pass it a single image and see the model's prediction:
-
-```cpp
-SimpleNeuralNetwork snn("../pretrained/model20e60k0p28.nn");
-std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000);
-
-snn.run_visual(test[0])
-
-/*
-Expected output:
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-. . . . . . : * ! ! ~ - . . . . . . . . . . . . . . . . 
-. . . . . . $ @ @ @ @ $ # # # # # # # # ! - . . . . . . 
-. . . . . . ~ ; ~ ; ! $ @ $ @ @ @ @ $ @ @ = . . . . . . 
-. . . . . . . . . . . , ~ , ~ ~ ~ ~ , $ @ ; . . . . . . 
-. . . . . . . . . . . . . . . . . . : @ # , . . . . . . 
-. . . . . . . . . . . . . . . . . , $ @ : . . . . . . . 
-. . . . . . . . . . . . . . . . . = @ $ - . . . . . . . 
-. . . . . . . . . . . . . . . . ~ @ @ ~ . . . . . . . . 
-. . . . . . . . . . . . . . . . = @ * . . . . . . . . . 
-. . . . . . . . . . . . . . . . # @ ~ . . . . . . . . . 
-. . . . . . . . . . . . . . . ; @ * . . . . . . . . . . 
-. . . . . . . . . . . . . . ~ @ $ - . . . . . . . . . . 
-. . . . . . . . . . . . . , $ @ ! . . . . . . . . . . . 
-. . . . . . . . . . . . . # @ # - . . . . . . . . . . . 
-. . . . . . . . . . . . - @ @ ~ . . . . . . . . . . . . 
-. . . . . . . . . . . , $ @ ; . . . . . . . . . . . . . 
-. . . . . . . . . . . = @ @ - . . . . . . . . . . . . . 
-. . . . . . . . . . ~ $ @ @ - . . . . . . . . . . . . . 
-. . . . . . . . . . ; @ @ # - . . . . . . . . . . . . . 
-. . . . . . . . . . ; @ # , . . . . . . . . . . . . . . 
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . 
-Label: 7
-
-The model predicted: 7
-*/
-```
-
-
-Lastly, once you have trained a model you can save the parameters to disk:
-```cpp
-std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000);
-    
-SimpleNeuralNetwork snn(train, 1, 0.28, true, 100); // Train constructor
-
-snn.save("/path/to/save.nn");
-```
-##
-Here is a simple main.cpp :
-
-main.cpp:
 ```cpp
 #include <iostream>
-#include "neural.hpp"
+#include <memory>
 
-int main(int argc, char** argv) {
+#include "nneural.hpp"
+#include "loss.hpp"
+#include "optimizer.hpp"
+#include "datasets/mnist.hpp"
 
-    std::vector<Image> train = csv_to_image("../datasets/mnist_train.csv", 10000); // MAX IMGS -> 60,000
-    std::vector<Image> test = csv_to_image("../datasets/mnist_test.csv", 1000); // MAX IMGS -> 10,000
+int main() {
+    auto train = load_mnist_csv("datasets/mnist_train.csv");
 
-    // TRAIN ----------------------------------------------------------------------------------
-    
-    SimpleNeuralNetwork e(train, 1, 0.28, true, 100); // Train constructor
-    printf("##### Model accuracy: %.2f%% #####\n\n",  snn.evaluate(test,  true)  *  100);
+    Model<fp32> cnn;
+    cnn.add(std::make_unique<ConvLayer<fp32>>(1, 8, 3));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<MaxPoolLayer<fp32>>(2));
+    cnn.add(std::make_unique<ConvLayer<fp32>>(8, 16, 3));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<MaxPoolLayer<fp32>>(2));
+    cnn.add(std::make_unique<FlattenLayer<fp32>>());
+    cnn.add(std::make_unique<DenseLayer<fp32>>(400, 64));
+    cnn.add(std::make_unique<ReLULayer<fp32>>());
+    cnn.add(std::make_unique<DenseLayer<fp32>>(64, 10));
+
+#ifdef __GPU_ACCELERATION_CUDA
+    cnn.to(Device::CUDA);
+    train.inputs  = train.inputs.to(Device::CUDA);
+    train.targets = train.targets.to(Device::CUDA);
+#endif
+
+    SGDOptimizer<fp32> optimizer(cnn.params(), 0.05f);
+    CrossEntropyLoss<fp32> loss;
+
+    const size_t batch_size = 64;
+    const size_t epochs     = 5;
+
+    for (size_t e = 0; e < epochs; ++e) {
+        auto indices = shuffled_indices(train.size(), train.inputs.device());
+
+        for (size_t i = 0; i < train.size(); i += batch_size) {
+            auto batch = gather_batch(train, indices, i, batch_size);
+
+            auto out = cnn.forward(batch.inputs);
+            loss.forward(out, batch.targets);
+            cnn.backward(loss.backward());
+
+            optimizer.optimize();
+            optimizer.zero_grads();
+        }
+        std::cout << "epoch " << e << " | loss: " << loss.loss() << '\n';
+    }
 }
 ```
+
+See [src/main.cpp](src/main.cpp) for a complete training and evaluation example on MNIST.

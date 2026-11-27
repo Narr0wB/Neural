@@ -1,6 +1,6 @@
 
-#ifndef NEURAL_HPP
-#define NEURAL_HPP
+#ifndef NNEURAL_HPP
+#define NNEURAL_HPP
 
 #include "tensor.hpp"
 #include "layer.hpp"
@@ -47,4 +47,4 @@ private:
     std::vector<std::unique_ptr<Layer<T>>> layers_;
 };
 
-#endif // NEURAL_HPP
+#endif // NNEURAL_HPP

@@ -4,7 +4,7 @@
 #include <format>
 #include <numeric>
 
-#include "neural.hpp"
+#include "nneural.hpp"
 #include "tensor.hpp"
 #include "layer.hpp"
 #include "loss.hpp"
